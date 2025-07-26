@@ -1,12 +1,12 @@
-use percent_encoding::{percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 
-use super::bencode::{BencodeValue, BencodeError};
+use super::bencode::{BencodeError, BencodeValue};
 
+use rand::Rng;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use rand::Rng;
+use std::path::Path;
 
 #[derive(Debug)]
 pub enum TorrentParseError {
@@ -29,7 +29,6 @@ impl From<std::io::Error> for TorrentParseError {
         TorrentParseError::Io(e)
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct Torrent {
@@ -70,30 +69,45 @@ impl Peer {
 impl Torrent {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, TorrentParseError> {
         let bytes = fs::read(path)?;
-        
+
         let (value, info_slice) = decode_and_extract_info(&bytes)?;
 
         if let BencodeValue::Dictionary(mut root_dict) = value {
             let announce = get_string(&mut root_dict, b"announce")?;
-            
-            let info = if let BencodeValue::Dictionary(mut info_dict) = super::bencode::decode(&info_slice)?.0 {
+
+            let info = if let BencodeValue::Dictionary(mut info_dict) =
+                super::bencode::decode(&info_slice)?.0
+            {
                 let name = get_string(&mut info_dict, b"name")?;
                 let piece_length = get_integer(&mut info_dict, b"piece length")?;
                 let pieces_bytes = get_bytes(&mut info_dict, b"pieces")?;
 
                 if pieces_bytes.len() % 20 != 0 {
-                    return Err(TorrentParseError::InvalidType("pieces length not divisible by 20".to_string()));
+                    return Err(TorrentParseError::InvalidType(
+                        "pieces length not divisible by 20".to_string(),
+                    ));
                 }
-                let pieces = pieces_bytes.chunks(20).map(|chunk| chunk.to_vec()).collect();
+                let pieces = pieces_bytes
+                    .chunks(20)
+                    .map(|chunk| chunk.to_vec())
+                    .collect();
 
-                Info { name, piece_length, pieces }
+                Info {
+                    name,
+                    piece_length,
+                    pieces,
+                }
             } else {
                 return Err(TorrentParseError::InvalidInfo);
             };
 
             let info_hash = sha1_smol::Sha1::from(info_slice).digest().bytes();
 
-            Ok(Torrent { announce, info_hash, info })
+            Ok(Torrent {
+                announce,
+                info_hash,
+                info,
+            })
         } else {
             Err(TorrentParseError::InvalidRoot)
         }
@@ -102,52 +116,58 @@ impl Torrent {
     pub fn discover_peers(&self) -> Result<AnnounceResponse, Box<dyn std::error::Error>> {
         let tracker_url = self.build_tracker_url()?;
         println!("Announcing to tracker: {}", tracker_url);
-    
+
         let client = reqwest::blocking::Client::new();
         let response = client.get(tracker_url).send()?;
-        
+
         if !response.status().is_success() {
-            return Err(format!("Tracker request failed with status: {}", response.status()).into());
+            return Err(
+                format!("Tracker request failed with status: {}", response.status()).into(),
+            );
         }
-    
+
         let response_bytes = response.bytes()?;
-    
+
         match super::bencode::decode(&response_bytes) {
             Ok((bencode_response, _)) => {
                 if let BencodeValue::Dictionary(mut dict) = bencode_response {
-                    if let Some(BencodeValue::Bytes(reason)) = dict.get(&b"failure reason".to_vec()) {
+                    if let Some(BencodeValue::Bytes(reason)) = dict.get(&b"failure reason".to_vec())
+                    {
                         let reason_str = String::from_utf8_lossy(reason);
                         return Err(format!("Tracker returned failure: {}", reason_str).into());
                     }
-        
+
                     let interval = match dict.get(&b"interval".to_vec()) {
                         Some(BencodeValue::Integer(i)) => *i,
                         _ => 1800, // Default to 30 minutes if not present
                     };
-    
-                    let peers = if let Some(BencodeValue::Bytes(peers_bytes)) = dict.remove(&b"peers".to_vec()) {
+
+                    let peers = if let Some(BencodeValue::Bytes(peers_bytes)) =
+                        dict.remove(&b"peers".to_vec())
+                    {
                         // If the key exists, parse the compact peer list.
                         Self::parse_compact_peers(&peers_bytes)?
                     } else {
                         // If the key is missing, successfully return an empty list.
                         Vec::new()
                     };
-    
+
                     Ok(AnnounceResponse { peers, interval })
-                    
-    
                 } else {
                     Err("Tracker response was not a valid dictionary.".into())
                 }
             }
             Err(e) => {
                 let raw_response = String::from_utf8_lossy(&response_bytes);
-                eprintln!("Failed to parse tracker response. Raw response:\n---\n{}\n---", raw_response);
+                eprintln!(
+                    "Failed to parse tracker response. Raw response:\n---\n{}\n---",
+                    raw_response
+                );
                 Err(format!("Failed to parse tracker response: {:?}", e).into())
             }
         }
     }
-    
+
     // CORRECTED build_tracker_url function
     fn build_tracker_url(&self) -> Result<String, Box<dyn std::error::Error>> {
         let base_url = &self.announce;
@@ -167,21 +187,24 @@ impl Torrent {
         let uploaded: i64 = 0;
         let downloaded: i64 = 0;
         let left = self.info.piece_length * self.info.pieces.len() as i64;
-        
-        const URL_ENCODE_SET: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'#').add(b'<').add(b'>').add(b'?').add(b'`').add(b'{').add(b'}');
+
+        const URL_ENCODE_SET: &AsciiSet = &CONTROLS
+            .add(b' ')
+            .add(b'"')
+            .add(b'#')
+            .add(b'<')
+            .add(b'>')
+            .add(b'?')
+            .add(b'`')
+            .add(b'{')
+            .add(b'}');
 
         let encoded_info_hash = percent_encode(&self.info_hash, URL_ENCODE_SET).to_string();
         let encoded_peer_id = percent_encode(&peer_id, URL_ENCODE_SET).to_string();
 
         let tracker_url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact=1&event=started",
-            base_url,
-            encoded_info_hash,
-            encoded_peer_id,
-            port,
-            uploaded,
-            downloaded,
-            left
+            base_url, encoded_info_hash, encoded_peer_id, port, uploaded, downloaded, left
         );
 
         Ok(tracker_url)
@@ -192,54 +215,75 @@ impl Torrent {
         if bytes.len() % 6 != 0 {
             return Err("Compact peer list has invalid length.".into());
         }
-        
+
         // chunks_exact provides a non-overlapping iterator over slices of 6 bytes
-        let peers = bytes.chunks_exact(6).map(|chunk| {
-            // First 4 bytes are the IP address.
-            let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
-            // Next 2 bytes are the port in big-endian format.
-            let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-            Peer::new(ip, port)
-        }).collect();
+        let peers = bytes
+            .chunks_exact(6)
+            .map(|chunk| {
+                // First 4 bytes are the IP address.
+                let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+                // Next 2 bytes are the port in big-endian format.
+                let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+                Peer::new(ip, port)
+            })
+            .collect();
 
         Ok(peers)
     }
-
 }
 
-
-fn get_string(dict: &mut BTreeMap<Vec<u8>, BencodeValue>, key: &[u8]) -> Result<String, TorrentParseError> {
+fn get_string(
+    dict: &mut BTreeMap<Vec<u8>, BencodeValue>,
+    key: &[u8],
+) -> Result<String, TorrentParseError> {
     let bytes = get_bytes(dict, key)?;
-    String::from_utf8(bytes).map_err(|_| TorrentParseError::InvalidType(String::from_utf8_lossy(key).to_string()))
+    String::from_utf8(bytes)
+        .map_err(|_| TorrentParseError::InvalidType(String::from_utf8_lossy(key).to_string()))
 }
 
-fn get_integer(dict: &mut BTreeMap<Vec<u8>, BencodeValue>, key: &[u8]) -> Result<i64, TorrentParseError> {
+fn get_integer(
+    dict: &mut BTreeMap<Vec<u8>, BencodeValue>,
+    key: &[u8],
+) -> Result<i64, TorrentParseError> {
     match dict.remove(key) {
         Some(BencodeValue::Integer(i)) => Ok(i),
-        Some(_) => Err(TorrentParseError::InvalidType(String::from_utf8_lossy(key).to_string())),
-        None => Err(TorrentParseError::MissingKey(String::from_utf8_lossy(key).to_string())),
+        Some(_) => Err(TorrentParseError::InvalidType(
+            String::from_utf8_lossy(key).to_string(),
+        )),
+        None => Err(TorrentParseError::MissingKey(
+            String::from_utf8_lossy(key).to_string(),
+        )),
     }
 }
 
-fn get_bytes(dict: &mut BTreeMap<Vec<u8>, BencodeValue>, key: &[u8]) -> Result<Vec<u8>, TorrentParseError> {
+fn get_bytes(
+    dict: &mut BTreeMap<Vec<u8>, BencodeValue>,
+    key: &[u8],
+) -> Result<Vec<u8>, TorrentParseError> {
     match dict.remove(key) {
         Some(BencodeValue::Bytes(b)) => Ok(b),
-        Some(_) => Err(TorrentParseError::InvalidType(String::from_utf8_lossy(key).to_string())),
-        None => Err(TorrentParseError::MissingKey(String::from_utf8_lossy(key).to_string())),
+        Some(_) => Err(TorrentParseError::InvalidType(
+            String::from_utf8_lossy(key).to_string(),
+        )),
+        None => Err(TorrentParseError::MissingKey(
+            String::from_utf8_lossy(key).to_string(),
+        )),
     }
 }
 
-fn decode_and_extract_info(encoded_value: &[u8]) -> Result<(BencodeValue, &[u8]), TorrentParseError> {
+fn decode_and_extract_info(
+    encoded_value: &[u8],
+) -> Result<(BencodeValue, &[u8]), TorrentParseError> {
     if encoded_value.is_empty() || encoded_value[0] != b'd' {
         return Err(TorrentParseError::InvalidRoot);
     }
-    
+
     // This is a slightly lazy way to do this, but it works for most files, we want to walk the bencode structure at some point
     let info_key = b"4:info";
     let mut info_slice_start = 0;
 
     for i in 1..encoded_value.len().saturating_sub(info_key.len()) {
-        if &encoded_value[i..i+info_key.len()] == info_key {
+        if &encoded_value[i..i + info_key.len()] == info_key {
             info_slice_start = i + info_key.len();
             break;
         }
@@ -250,17 +294,16 @@ fn decode_and_extract_info(encoded_value: &[u8]) -> Result<(BencodeValue, &[u8])
     }
 
     let (value, _) = super::bencode::decode(encoded_value)?;
-    
+
     let (_, info_remainder) = super::bencode::decode(&encoded_value[info_slice_start..])?;
     let info_slice_end = encoded_value.len() - info_remainder.len();
-    
+
     Ok((value, &encoded_value[info_slice_start..info_slice_end]))
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::*; 
+    use super::*;
     use std::env;
     use std::path::Path;
 
@@ -282,7 +325,10 @@ mod tests {
         // Act: Parse the file
 
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = Path::new(manifest_dir).join("tests").join("data").join("sample.torrent");
+        let file_path = Path::new(manifest_dir)
+            .join("tests")
+            .join("data")
+            .join("sample.torrent");
 
         let torrent = Torrent::from_file(&file_path)
             .expect(&format!("Failed to parse torrent file at {:?}", file_path));

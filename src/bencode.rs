@@ -39,8 +39,11 @@ fn decode_byte_string_value(encoded_value: &[u8]) -> Result<(BencodeValue, &[u8]
 fn decode_byte_string_slice(encoded_value: &[u8]) -> Result<(&[u8], &[u8]), BencodeError> {
     if let Some(colon_index) = encoded_value.iter().position(|&b| b == b':') {
         let len_slice = &encoded_value[..colon_index];
-        let len_str = std::str::from_utf8(len_slice).map_err(|_| BencodeError::InvalidStringLength)?;
-        let len = len_str.parse::<usize>().map_err(|_| BencodeError::InvalidStringLength)?;
+        let len_str =
+            std::str::from_utf8(len_slice).map_err(|_| BencodeError::InvalidStringLength)?;
+        let len = len_str
+            .parse::<usize>()
+            .map_err(|_| BencodeError::InvalidStringLength)?;
         let start = colon_index + 1;
         let end = start + len;
         if end > encoded_value.len() {
@@ -57,9 +60,14 @@ fn decode_integer(encoded_value: &[u8]) -> Result<(BencodeValue, &[u8]), Bencode
         // Here we start from index 1 to skip the 'i'
         let num_slice = &encoded_value[1..end_index];
         let num_str = std::str::from_utf8(num_slice).map_err(|_| BencodeError::InvalidInteger)?;
-        let number = num_str.parse::<i64>().map_err(|_| BencodeError::InvalidInteger)?;
+        let number = num_str
+            .parse::<i64>()
+            .map_err(|_| BencodeError::InvalidInteger)?;
         // And here we skip the 'e' for the remainder
-        Ok((BencodeValue::Integer(number), &encoded_value[end_index + 1..]))
+        Ok((
+            BencodeValue::Integer(number),
+            &encoded_value[end_index + 1..],
+        ))
     } else {
         Err(BencodeError::ExpectedCharacter('e'))
     }
