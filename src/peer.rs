@@ -44,8 +44,8 @@ pub fn perform_handshake(
     // 1. Establish a TCP connection. Set a timeout to avoid hanging indefinitely.
     let socket_addr = peer.socket_address();
     //conversion shenanigans - easier to just cast and then pass a ref
-    let generic_socket_addr = std::net::SocketAddr::from(socket_addr); 
-    let mut stream = TcpStream::connect_timeout(&generic_socket_addr, Duration::from_secs(3))?; 
+    let generic_socket_addr = std::net::SocketAddr::from(socket_addr);
+    let mut stream = TcpStream::connect_timeout(&generic_socket_addr, Duration::from_secs(3))?;
     println!("TCP connection established with {}", peer.socket_address());
 
     // 2. Construct and send our handshake message.
@@ -57,7 +57,7 @@ pub fn perform_handshake(
     let mut response_buf = [0u8; 68];
     stream.read_exact(&mut response_buf)?;
     println!("Received handshake response from {}", peer.socket_address());
-    
+
     // 4. Validate the response.
     // The most important part is checking if the info_hash matches.
     let their_info_hash = &response_buf[28..48];
@@ -65,7 +65,8 @@ pub fn perform_handshake(
         return Err(format!(
             "Handshake failed: Info hash mismatch with peer {}",
             peer.socket_address()
-        ).into());
+        )
+        .into());
     }
 
     // Optional: You could also parse their full handshake and get their peer_id.

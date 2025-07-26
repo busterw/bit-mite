@@ -1,4 +1,4 @@
-use percent_encoding::{percent_encode, AsciiSet, CONTROLS, NON_ALPHANUMERIC};
+use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, percent_encode};
 
 use super::bencode::{BencodeError, BencodeValue};
 
@@ -181,7 +181,7 @@ impl Torrent {
         let uploaded: i64 = 0;
         let downloaded: i64 = 0;
         let left = self.info.piece_length * self.info.pieces.len() as i64;
-        
+
         // --- THIS IS THE CRITICAL CHANGE ---
         // We are now using the standard NON_ALPHANUMERIC set. This will encode
         // any byte that isn't a letter or number, which is the robust way
@@ -192,15 +192,9 @@ impl Torrent {
 
         let tracker_url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact=1&event=started",
-            base_url,
-            encoded_info_hash,
-            encoded_peer_id,
-            port,
-            uploaded,
-            downloaded,
-            left
+            base_url, encoded_info_hash, encoded_peer_id, port, uploaded, downloaded, left
         );
-        
+
         // DEBUGGING: Let's print the final URL to be absolutely sure.
         // You can remove this later.
         println!("Final Tracker URL: {}", tracker_url);
