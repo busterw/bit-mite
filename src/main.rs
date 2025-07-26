@@ -1,6 +1,7 @@
 use rand::Rng;
 
 mod bencode;
+mod messages;
 mod peer;
 mod torrent;
 
@@ -36,10 +37,23 @@ fn main() {
                         for peer in response.peers {
                             match peer::perform_handshake(&peer, &t.info_hash, &our_peer_id) {
                                 Ok(stream) => {
-                                    // Success! We found a working peer.
-                                    println!("Handshake Succeeded with {}", peer.socket_address());
-                                    connected_stream = Some(stream);
-                                    // We've got our connection, so we can stop trying other peers.
+                                    println!("--------------------------------");
+                                    println!("HANDSHAKE SUCCEEDED with {}", peer.socket_address());
+                                    println!("--------------------------------");
+
+                                    match peer::run_peer_session(stream, &t.info) {
+                                        Ok(_) => {
+                                            println!("Session completed successfully.");
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "Session failed with {}: {}",
+                                                peer.socket_address(),
+                                                e
+                                            );
+                                        }
+                                    }
+                                    // We've completed our interaction with this peer, so break the loop.
                                     break;
                                 }
                                 Err(e) => {
@@ -50,11 +64,11 @@ fn main() {
                                     );
                                 }
                             }
-                        }
-                        if connected_stream.is_none() {
-                            println!(
-                                "Could not establish a connection with any of the discovered peers."
-                            );
+                            if connected_stream.is_none() {
+                                println!(
+                                    "Could not establish a connection with any of the discovered peers."
+                                );
+                            }
                         }
                     }
                 }
@@ -69,4 +83,4 @@ fn main() {
     }
 }
 
-//let torrent_file = "/home/buster/Downloads/scifiarchivum_archive.torrent";
+//let torrent_file = "/home/buster/Downloads/scifiarchivum_archive.torrent"

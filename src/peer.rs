@@ -1,3 +1,4 @@
+use super::messages::Message;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -76,4 +77,80 @@ pub fn perform_handshake(
     println!("Handshake successful with peer {}!", peer.socket_address());
     // The stream is now ready for the next phase of communication.
     Ok(stream)
+}
+
+pub fn run_peer_session(
+    mut stream: TcpStream, // Takes ownership of the stream
+    torrent_info: &super::torrent::Info,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut peer_choked = true;
+    let mut peer_bitfield: Option<Vec<u8>> = None;
+
+    // The main loop where we read messages from the peer.
+    loop {
+        match Message::parse(&mut stream) {
+            Ok(message) => {
+                println!("Received message: {:?}", message);
+
+                match message {
+                    Message::Bitfield(bitfield) => {
+                        println!("Received bitfield. Peer has pieces.");
+                        peer_bitfield = Some(bitfield);
+
+                        // Now that we have their bitfield, tell them we're interested.
+                        let interested_msg = Message::Interested;
+                        stream.write_all(&interested_msg.serialize())?;
+                        println!("Sent 'Interested' message.");
+                    }
+                    Message::Unchoke => {
+                        println!("Peer unchoked us! We can now request pieces.");
+                        peer_choked = false;
+                    }
+                    Message::Piece {
+                        index,
+                        begin,
+                        block,
+                    } => {
+                        println!("Received block for piece {} at offset {}", index, begin);
+                        // In a real client, you would save this block to a file.
+                        // For now, we'll just print its size.
+                        println!("Block size: {}", block.len());
+
+                        // Here you would check if you have all blocks for the piece.
+                        // If so, you'd verify the hash. If the hash is good, you are done!
+                        // For this example, we'll just exit after receiving one block.
+                        println!("\nSUCCESS! DOWNLOADED OUR FIRST BLOCK.");
+                        return Ok(());
+                    }
+                    // We can ignore many messages for now
+                    Message::Choke => peer_choked = true,
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                // If there's an error, the connection likely dropped.
+                return Err(format!("Error reading message from peer: {}", e).into());
+            }
+        }
+
+        // If we are unchoked and we know what pieces the peer has,
+        // we can send a request for a block.
+        if !peer_choked && peer_bitfield.is_some() {
+            // Let's request the first block of the first piece.
+            // A standard block size is 16 KiB (16384 bytes).
+            let block_size = 16384;
+
+            // This is a simplified request for the very first block.
+            // A real client would have a sophisticated piece selection strategy.
+            println!("Requesting block from peer...");
+            let request_msg = Message::Request {
+                index: 0,
+                begin: 0,
+                length: block_size,
+            };
+            stream.write_all(&request_msg.serialize())?;
+
+            // TODO : get all pieces, not just 1
+        }
+    }
 }
