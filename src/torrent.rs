@@ -123,3 +123,44 @@ fn decode_and_extract_info(encoded_value: &[u8]) -> Result<(BencodeValue, &[u8])
     
     Ok((value, &encoded_value[info_slice_start..info_slice_end]))
 }
+
+// At the end of src/torrent.rs
+
+#[cfg(test)]
+mod tests {
+    use super::*; // Import everything from the parent module (torrent.rs)
+    use std::env;
+    use std::path::Path;
+
+    #[test]
+    fn test_parse_sample_torrent_file() {
+        // Arrange: Define what we expect to find in the file.
+
+        let expected_announce = "udp://tracker.openbittorrent.com:80";
+        let expected_info_name = "sample.txt";
+        let expected_piece_length = 65536;
+        let expected_num_pieces = 1;
+        // converte hash from hex to bytes for comparison
+        let expected_hash_hex = "d0d14c926e6e99761a2fdcff27b403d96376eff6";
+        let expected_hash_bytes: [u8; 20] = hex::decode(expected_hash_hex)
+            .expect("Failed to decode hex string")
+            .try_into()
+            .expect("Info hash was not 20 bytes");
+
+        // Act: Parse the file
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = Path::new(manifest_dir).join("tests").join("data").join("sample.torrent");
+
+        let torrent = Torrent::from_file(&file_path)
+            .expect(&format!("Failed to parse torrent file at {:?}", file_path));
+
+        // Assert: Check if the parsed data matches
+
+        assert_eq!(torrent.announce, expected_announce);
+        assert_eq!(torrent.info.name, expected_info_name);
+        assert_eq!(torrent.info.piece_length, expected_piece_length);
+        assert_eq!(torrent.info.pieces.len(), expected_num_pieces);
+        assert_eq!(torrent.info_hash, expected_hash_bytes);
+    }
+}
