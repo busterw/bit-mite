@@ -1,4 +1,4 @@
-use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
+use percent_encoding::{percent_encode, AsciiSet, CONTROLS, NON_ALPHANUMERIC};
 
 use super::bencode::{BencodeError, BencodeValue};
 
@@ -113,8 +113,12 @@ impl Torrent {
         }
     }
 
-    pub fn discover_peers(&self) -> Result<AnnounceResponse, Box<dyn std::error::Error>> {
-        let tracker_url = self.build_tracker_url()?;
+    pub fn discover_peers(
+        &self,
+        our_peer_id: &[u8; 20], // <-- CHANGE: Added parameter
+    ) -> Result<AnnounceResponse, Box<dyn std::error::Error>> {
+        // Pass the peer_id down to the URL builder
+        let tracker_url = self.build_tracker_url(our_peer_id)?; // <-- CHANGE: Pass parameter
         println!("Announcing to tracker: {}", tracker_url);
 
         let client = reqwest::blocking::Client::new();
@@ -168,44 +172,38 @@ impl Torrent {
         }
     }
 
-    // CORRECTED build_tracker_url function
-    fn build_tracker_url(&self) -> Result<String, Box<dyn std::error::Error>> {
+    fn build_tracker_url(
+        &self,
+        our_peer_id: &[u8; 20],
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let base_url = &self.announce;
-
-        // most trackers only like being connected via a 'real'
-        // torrent client, so we have to fake being one:
-        // generate a peer_id that impersonates Transmission 2.94
-        // The format is: -<Client Code><Version>-<Random Chars>
-        // -TR2940-<12 random bytes>
-        let mut peer_id = [0u8; 20];
-        peer_id[..8].copy_from_slice(b"-TR2940-");
-        // Generate 12 random bytes for the end
-        let mut rng = rand::thread_rng();
-        peer_id[8..].copy_from_slice(&rng.r#gen::<[u8; 12]>());
-
         let port: u16 = 6881;
         let uploaded: i64 = 0;
         let downloaded: i64 = 0;
         let left = self.info.piece_length * self.info.pieces.len() as i64;
-
-        const URL_ENCODE_SET: &AsciiSet = &CONTROLS
-            .add(b' ')
-            .add(b'"')
-            .add(b'#')
-            .add(b'<')
-            .add(b'>')
-            .add(b'?')
-            .add(b'`')
-            .add(b'{')
-            .add(b'}');
-
-        let encoded_info_hash = percent_encode(&self.info_hash, URL_ENCODE_SET).to_string();
-        let encoded_peer_id = percent_encode(&peer_id, URL_ENCODE_SET).to_string();
+        
+        // --- THIS IS THE CRITICAL CHANGE ---
+        // We are now using the standard NON_ALPHANUMERIC set. This will encode
+        // any byte that isn't a letter or number, which is the robust way
+        // to handle the arbitrary bytes of the info_hash and peer_id.
+        let encoded_info_hash = percent_encode(&self.info_hash, NON_ALPHANUMERIC).to_string();
+        let encoded_peer_id = percent_encode(our_peer_id, NON_ALPHANUMERIC).to_string();
+        // --- END CHANGE ---
 
         let tracker_url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact=1&event=started",
-            base_url, encoded_info_hash, encoded_peer_id, port, uploaded, downloaded, left
+            base_url,
+            encoded_info_hash,
+            encoded_peer_id,
+            port,
+            uploaded,
+            downloaded,
+            left
         );
+        
+        // DEBUGGING: Let's print the final URL to be absolutely sure.
+        // You can remove this later.
+        println!("Final Tracker URL: {}", tracker_url);
 
         Ok(tracker_url)
     }
