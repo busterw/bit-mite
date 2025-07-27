@@ -1,19 +1,14 @@
-// In src/main.rs
 use rand::Rng;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 
-// All the `mod` declarations should be at the top level of the file
 pub mod bencode;
-pub mod torrent;
-pub mod peer;
 pub mod messages;
+pub mod peer;
+pub mod torrent;
 
-// A new helper function to prepare the filesystem
-fn prepare_filesystem(
-    info: &torrent::Info,
-) -> Result<HashMap<PathBuf, File>, std::io::Error> {
+fn prepare_filesystem(info: &torrent::Info) -> Result<HashMap<PathBuf, File>, std::io::Error> {
     let mut file_handles = HashMap::new();
 
     match &info.mode {
@@ -48,12 +43,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t = torrent::Torrent::from_file(torrent_file).unwrap();
     println!("Successfully parsed torrent: {}", t.info.name);
 
-    // --- NEW: Prepare filesystem before doing anything else ---
     println!("Preparing filesystem...");
     let mut file_handles = prepare_filesystem(&t.info)?;
     let mapper = torrent::FileMapper::new(&t.info);
     println!("Filesystem prepared.");
-    // ---
 
     let mut our_peer_id = [0u8; 20];
     our_peer_id[..8].copy_from_slice(b"-TR2940-");
@@ -61,30 +54,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     our_peer_id[8..].copy_from_slice(&rng.r#gen::<[u8; 12]>());
 
     let response = t.discover_peers(&our_peer_id)?;
-    println!("Tracker announce successful! Interval: {}", response.interval);
+    println!(
+        "Tracker announce successful! Interval: {}",
+        response.interval
+    );
 
     if response.peers.is_empty() {
         println!("No peers found.");
     } else {
-        println!("Discovered {} peers. Attempting to connect...", response.peers.len());
-    
+        println!(
+            "Discovered {} peers. Attempting to connect...",
+            response.peers.len()
+        );
+
         let mut download_state = torrent::DownloadState::new(&t.info);
-    
+
         for peer in response.peers {
             if download_state.pieces_to_download.is_empty() {
                 break;
             }
-    
+
             match peer::perform_handshake(&peer, &t.info_hash, &our_peer_id) {
                 Ok(stream) => {
                     println!("HANDSHAKE SUCCEEDED with {}", peer.socket_address());
-                    
-                    // Pass the new tools to the session runner
+
                     if let Err(e) = peer::run_peer_session(
                         stream,
                         &mut download_state,
                         &mut file_handles,
-                        &mapper
+                        &mapper,
                     ) {
                         eprintln!("Session failed with {}: {}", peer.socket_address(), e);
                     }
@@ -94,14 +92,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-    
+
         if download_state.pieces_to_download.is_empty() {
             println!("\n--------------------------------");
             println!("  All pieces downloaded and verified successfully! ");
             println!("  Output directory: {}", t.info.name);
             println!("--------------------------------");
         } else {
-            println!("\nCould not complete download. Still need {} pieces.", download_state.pieces_to_download.len());
+            println!(
+                "\nCould not complete download. Still need {} pieces.",
+                download_state.pieces_to_download.len()
+            );
         }
     }
 

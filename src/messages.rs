@@ -127,8 +127,7 @@ impl Message {
                 bytes.extend_from_slice(&length.to_be_bytes());
                 bytes
             }
-            // Other message types can be serialized here as needed...
-            _ => vec![], // Placeholder for simplicity
+            _ => vec![], // Placeholder
         }
     }
 }

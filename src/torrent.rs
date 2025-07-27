@@ -1,14 +1,13 @@
-use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, percent_encode};
+use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 
 use super::bencode::{BencodeError, BencodeValue};
 
-use rand::Rng;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -83,7 +82,6 @@ pub enum InfoMode {
 
 #[derive(Debug)]
 pub struct FileMapper {
-    // A pre-computed list of (global_start_offset, FileInfo)
     file_offsets: Vec<(u64, FileInfo)>,
 }
 
@@ -114,11 +112,9 @@ impl Torrent {
                 let pieces_bytes = get_bytes(&mut info_dict, b"pieces")?;
                 let pieces = pieces_bytes.chunks(20).map(|c| c.to_vec()).collect();
 
-                // --- THIS IS THE NEW LOGIC FOR DETECTING THE MODE ---
                 let mode = if let Some(BencodeValue::List(files_list)) =
                     info_dict.remove(&b"files".to_vec())
                 {
-                    // MULTI-FILE MODE
                     let mut files = Vec::new();
                     for file_val in files_list {
                         if let BencodeValue::Dictionary(mut file_dict) = file_val {
@@ -147,7 +143,6 @@ impl Torrent {
                     let length = get_integer(&mut info_dict, b"length")?;
                     InfoMode::SingleFile { length }
                 };
-                // --- END NEW LOGIC ---
 
                 Info {
                     name,
@@ -173,10 +168,10 @@ impl Torrent {
 
     pub fn discover_peers(
         &self,
-        our_peer_id: &[u8; 20], // <-- CHANGE: Added parameter
+        our_peer_id: &[u8; 20],
     ) -> Result<AnnounceResponse, Box<dyn std::error::Error>> {
         // Pass the peer_id down to the URL builder
-        let tracker_url = self.build_tracker_url(our_peer_id)?; // <-- CHANGE: Pass parameter
+        let tracker_url = self.build_tracker_url(our_peer_id)?;
         println!("Announcing to tracker: {}", tracker_url);
 
         let client = reqwest::blocking::Client::new();
@@ -207,10 +202,8 @@ impl Torrent {
                     let peers = if let Some(BencodeValue::Bytes(peers_bytes)) =
                         dict.remove(&b"peers".to_vec())
                     {
-                        // If the key exists, parse the compact peer list.
                         Self::parse_compact_peers(&peers_bytes)?
                     } else {
-                        // If the key is missing, successfully return an empty list.
                         Vec::new()
                     };
 
@@ -240,22 +233,13 @@ impl Torrent {
         let downloaded: i64 = 0;
         let left = self.info.piece_length * self.info.pieces.len() as i64;
 
-        // --- THIS IS THE CRITICAL CHANGE ---
-        // We are now using the standard NON_ALPHANUMERIC set. This will encode
-        // any byte that isn't a letter or number, which is the robust way
-        // to handle the arbitrary bytes of the info_hash and peer_id.
         let encoded_info_hash = percent_encode(&self.info_hash, NON_ALPHANUMERIC).to_string();
         let encoded_peer_id = percent_encode(our_peer_id, NON_ALPHANUMERIC).to_string();
-        // --- END CHANGE ---
 
         let tracker_url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact=1&event=started",
             base_url, encoded_info_hash, encoded_peer_id, port, uploaded, downloaded, left
         );
-
-        // DEBUGGING: Let's print the final URL to be absolutely sure.
-        // You can remove this later.
-        println!("Final Tracker URL: {}", tracker_url);
 
         Ok(tracker_url)
     }
@@ -266,13 +250,12 @@ impl Torrent {
             return Err("Compact peer list has invalid length.".into());
         }
 
-        // chunks_exact provides a non-overlapping iterator over slices of 6 bytes
         let peers = bytes
             .chunks_exact(6)
             .map(|chunk| {
-                // First 4 bytes are the IP address.
+                // First 4 bytes are IP
                 let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
-                // Next 2 bytes are the port in big-endian format.
+                // Next 2 bytes are the port
                 let port = u16::from_be_bytes([chunk[4], chunk[5]]);
                 Peer::new(ip, port)
             })
@@ -301,70 +284,73 @@ impl<'a> DownloadState<'a> {
     /// Verifies the SHA-1 hash of the currently assembled piece.
     pub fn verify_and_save_current_piece(
         &mut self,
-        file_handles: &mut HashMap<PathBuf, File>, // Map of paths to open file handles
-        mapper: &FileMapper,                     // Our new mapping helper
+        file_handles: &mut HashMap<PathBuf, File>,
+        mapper: &FileMapper,
     ) -> Result<bool, std::io::Error> {
         let piece_slice = &self.current_piece_data[..];
         let expected_hash = &self.info.pieces[self.current_piece_index];
         let actual_hash = sha1_smol::Sha1::from(piece_slice).digest().bytes();
 
         if actual_hash != expected_hash.as_slice() {
-            eprintln!("ERROR: Piece #{} failed hash check.", self.current_piece_index);
+            eprintln!(
+                "ERROR: Piece #{} failed hash check.",
+                self.current_piece_index
+            );
             return Ok(false);
         }
 
-        println!("SUCCESS: Piece #{} passed hash check.", self.current_piece_index);
+        println!(
+            "SUCCESS: Piece #{} passed hash check.",
+            self.current_piece_index
+        );
         let piece_offset = self.current_piece_index as u64 * self.info.piece_length as u64;
 
-        // --- NEW LOGIC: Writing the piece data correctly ---
         match &self.info.mode {
             InfoMode::SingleFile { .. } => {
-                // For single-file mode, the logic is simple.
                 let file_path = PathBuf::from(&self.info.name);
                 let file = file_handles.get_mut(&file_path).unwrap();
                 file.seek(SeekFrom::Start(piece_offset))?;
                 file.write_all(piece_slice)?;
             }
             InfoMode::MultiFile { .. } => {
-                // For multi-file mode, we use the mapper.
                 let mut bytes_written = 0;
                 for (file_start_offset, file_info) in &mapper.file_offsets {
                     // Check if this piece overlaps with this file at all
                     let file_end_offset = file_start_offset + file_info.length as u64;
-                    if piece_offset >= file_end_offset || piece_offset + piece_slice.len() as u64 <= *file_start_offset {
+                    if piece_offset >= file_end_offset
+                        || piece_offset + piece_slice.len() as u64 <= *file_start_offset
+                    {
                         continue; // No overlap
                     }
 
-                    // Find the slice of the piece that belongs to this file
                     let write_start = std::cmp::max(piece_offset, *file_start_offset);
-                    let write_end = std::cmp::min(piece_offset + piece_slice.len() as u64, file_end_offset);
+                    let write_end =
+                        std::cmp::min(piece_offset + piece_slice.len() as u64, file_end_offset);
                     let data_start = (write_start - piece_offset) as usize;
                     let data_end = (write_end - piece_offset) as usize;
                     let data_to_write = &piece_slice[data_start..data_end];
 
-                    // Write that slice to the correct offset in the file
                     let file_offset = write_start - file_start_offset;
                     let file = file_handles.get_mut(&file_info.path).unwrap();
                     file.seek(SeekFrom::Start(file_offset))?;
                     file.write_all(data_to_write)?;
-                    
+
                     bytes_written += data_to_write.len();
                 }
-                println!("Piece #{} written to disk ({} bytes across files).", self.current_piece_index, bytes_written);
+                println!(
+                    "Piece #{} written to disk ({} bytes across files).",
+                    self.current_piece_index, bytes_written
+                );
             }
         }
         Ok(true)
-    } 
-    
+    }
 
-    /// Resets the state to prepare for downloading the next piece.
     pub fn prepare_for_next_piece(&mut self) {
         self.pieces_to_download
             .retain(|&p| p != self.current_piece_index);
 
-        // --- FIX: Re-allocate the buffer for the next piece ---
         self.current_piece_data = vec![0; self.info.piece_length as usize];
-        // ---
         self.blocks_received = 0;
 
         if let Some(&next_piece) = self.pieces_to_download.first() {

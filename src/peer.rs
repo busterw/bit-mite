@@ -1,12 +1,11 @@
 use super::messages::Message;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
-use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
-/// Represents the handshake message.
 #[derive(Debug)]
 pub struct Handshake {
     pub info_hash: [u8; 20],
@@ -18,7 +17,6 @@ impl Handshake {
         Self { info_hash, peer_id }
     }
 
-    /// Serializes the Handshake struct into the 68-byte message format.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(68);
         // 1. Protocol string length
@@ -63,7 +61,6 @@ pub fn perform_handshake(
     println!("Received handshake response from {}", peer.socket_address());
 
     // 4. Validate the response.
-    // The most important part is checking if the info_hash matches.
     let their_info_hash = &response_buf[28..48];
     if their_info_hash != info_hash {
         return Err(format!(
@@ -74,19 +71,18 @@ pub fn perform_handshake(
     }
 
     println!("Handshake successful with peer {}!", peer.socket_address());
-    // The stream is now ready for the next phase of communication.
     Ok(stream)
 }
 
 pub fn run_peer_session(
     mut stream: TcpStream,
     state: &mut super::torrent::DownloadState,
-    file_handles: &mut HashMap<PathBuf, File>, // For writing to disk
-    mapper: &super::torrent::FileMapper,      // For mapping pieces to files
+    file_handles: &mut HashMap<PathBuf, File>,
+    mapper: &super::torrent::FileMapper,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut peer_choked = true;
     let mut peer_bitfield: Option<Vec<u8>> = None;
-    
+
     const BLOCK_SIZE: u32 = 16384;
 
     while !state.pieces_to_download.is_empty() {
@@ -95,11 +91,16 @@ pub fn run_peer_session(
                 match message {
                     Message::Unchoke => peer_choked = false,
                     Message::Bitfield(bf) => peer_bitfield = Some(bf),
-                    Message::Piece { index, begin, block } => {
+                    Message::Piece {
+                        index,
+                        begin,
+                        block,
+                    } => {
                         if index as usize == state.current_piece_index {
                             let block_start = begin as usize;
                             let block_end = block_start + block.len();
-                            state.current_piece_data[block_start..block_end].copy_from_slice(&block);
+                            state.current_piece_data[block_start..block_end]
+                                .copy_from_slice(&block);
                             state.blocks_received += 1;
 
                             // We need to know the torrent's piece_length to calculate when a piece is complete.
@@ -130,7 +131,6 @@ pub fn run_peer_session(
                 let bit_index = state.current_piece_index % 8;
                 if let Some(&byte) = bf.get(byte_index) {
                     if (byte >> (7 - bit_index)) & 1 != 0 {
-                        // The peer has the piece we want.
                         let piece_length = state.get_info().piece_length as u32;
                         let next_block_offset = (state.blocks_received as u32) * BLOCK_SIZE;
 
@@ -141,7 +141,7 @@ pub fn run_peer_session(
                             } else {
                                 BLOCK_SIZE
                             };
-                            
+
                             let request_msg = Message::Request {
                                 index: state.current_piece_index as u32,
                                 begin: next_block_offset,
