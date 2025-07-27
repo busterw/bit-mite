@@ -85,6 +85,13 @@ pub struct FileMapper {
     file_offsets: Vec<(u64, FileInfo)>,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct MagnetLink {
+    pub name: Option<String>,
+    pub info_hash: [u8; 20],
+    pub trackers: Vec<String>,
+}
+
 impl Peer {
     pub fn new(ip: Ipv4Addr, port: u16) -> Self {
         Self { ip, port }
@@ -374,6 +381,56 @@ impl FileMapper {
     }
 }
 
+impl MagnetLink {
+    /// Parses a magnet URI string into a MagnetLink struct.
+    pub fn from_uri(uri: &str) -> Result<Self, &'static str> {
+        let url = match url::Url::parse(uri) {
+            Ok(u) => u,
+            Err(_) => return Err("Failed to parse magnet URI"),
+        };
+
+        if url.scheme() != "magnet" {
+            return Err("URI is not a magnet link");
+        }
+
+        let mut info_hash = [0u8; 20];
+        let mut name = None;
+        let mut trackers = Vec::new();
+
+        let xt_param = url.query_pairs().find(|(key, _)| key == "xt");
+
+        if let Some((_, xt_val)) = xt_param {
+            if let Some(hash_str) = xt_val.strip_prefix("urn:btih:") {
+                if hash_str.len() == 40 {
+                    if hex::decode_to_slice(hash_str, &mut info_hash).is_err() {
+                        return Err("Info hash contains invalid hex characters");
+                    }
+                } else {
+                    return Err("Info hash is not 40 characters long");
+                }
+            } else {
+                return Err("Invalid or missing URN in xt parameter");
+            }
+        } else {
+            return Err("Missing info_hash (xt) in magnet link");
+        }
+
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "dn" => name = Some(value.to_string()),   // Display Name
+                "tr" => trackers.push(value.to_string()), // Tracker
+                _ => {}                                   // Ignore other params for now
+            }
+        }
+
+        Ok(Self {
+            name,
+            info_hash,
+            trackers,
+        })
+    }
+}
+
 fn get_string(
     dict: &mut BTreeMap<Vec<u8>, BencodeValue>,
     key: &[u8],
@@ -482,5 +539,65 @@ mod tests {
         assert_eq!(torrent.info.piece_length, expected_piece_length);
         assert_eq!(torrent.info.pieces.len(), expected_num_pieces);
         assert_eq!(torrent.info_hash, expected_hash_bytes);
+    }
+    #[test]
+    fn test_parse_full_magnet_link() {
+        let uri = "magnet:?xt=urn:btih:d0d14c926e6e99761a2fdcff27b403d96376eff6&dn=sample.txt&tr=udp://tracker.openbittorrent.com:80";
+        let magnet = MagnetLink::from_uri(uri).unwrap();
+
+        let expected_hash: [u8; 20] = hex::decode("d0d14c926e6e99761a2fdcff27b403d96376eff6")
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        assert_eq!(magnet.info_hash, expected_hash);
+        assert_eq!(magnet.name, Some("sample.txt".to_string()));
+        assert_eq!(
+            magnet.trackers,
+            vec!["udp://tracker.openbittorrent.com:80".to_string()]
+        );
+    }
+
+    // Test a link with multiple trackers.
+    #[test]
+    fn test_parse_multiple_trackers() {
+        let uri = "magnet:?xt=urn:btih:d0d14c926e6e99761a2fdcff27b403d96376eff6&tr=udp://tracker.one:80&tr=udp://tracker.two:80";
+        let magnet = MagnetLink::from_uri(uri).unwrap();
+
+        assert_eq!(magnet.trackers.len(), 2);
+        assert_eq!(magnet.trackers[0], "udp://tracker.one:80");
+        assert_eq!(magnet.trackers[1], "udp://tracker.two:80");
+    }
+
+    // Test a minimal magnet link with only the required info_hash.
+    #[test]
+    fn test_parse_minimal_magnet_link() {
+        let uri = "magnet:?xt=urn:btih:d0d14c926e6e99761a2fdcff27b403d96376eff6";
+        let magnet = MagnetLink::from_uri(uri).unwrap();
+
+        let expected_hash: [u8; 20] = hex::decode("d0d14c926e6e99761a2fdcff27b403d96376eff6")
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        assert_eq!(magnet.info_hash, expected_hash);
+        assert!(magnet.name.is_none());
+        assert!(magnet.trackers.is_empty());
+    }
+
+    // Test failure cases.
+    #[test]
+    fn test_parse_invalid_links() {
+        // Not a magnet link
+        assert!(MagnetLink::from_uri("http://example.com").is_err());
+        // Missing xt parameter
+        assert!(MagnetLink::from_uri("magnet:?dn=sample.txt").is_err());
+        // Malformed hash (too short)
+        assert!(MagnetLink::from_uri("magnet:?xt=urn:btih:12345").is_err());
+        // Malformed hash (not hex)
+        assert!(
+            MagnetLink::from_uri("magnet:?xt=urn:btih:gggggggggggggggggggggggggggggggggggggggg")
+                .is_err()
+        );
     }
 }
