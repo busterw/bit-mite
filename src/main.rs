@@ -1,7 +1,7 @@
 use rand::Rng;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub mod bencode;
 pub mod messages;
