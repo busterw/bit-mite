@@ -1,7 +1,10 @@
 use super::messages::Message;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Represents the handshake message.
 #[derive(Debug)]
@@ -70,87 +73,88 @@ pub fn perform_handshake(
         .into());
     }
 
-    // Optional: You could also parse their full handshake and get their peer_id.
-    // let their_peer_id = &response_buf[48..68];
-    // println!("Peer {} has peer_id: {}", peer.socket_address(), String::from_utf8_lossy(their_peer_id));
-
     println!("Handshake successful with peer {}!", peer.socket_address());
     // The stream is now ready for the next phase of communication.
     Ok(stream)
 }
 
 pub fn run_peer_session(
-    mut stream: TcpStream, // Takes ownership of the stream
-    torrent_info: &super::torrent::Info,
+    mut stream: TcpStream,
+    state: &mut super::torrent::DownloadState,
+    file_handles: &mut HashMap<PathBuf, File>, // For writing to disk
+    mapper: &super::torrent::FileMapper,      // For mapping pieces to files
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut peer_choked = true;
     let mut peer_bitfield: Option<Vec<u8>> = None;
+    
+    const BLOCK_SIZE: u32 = 16384;
 
-    // The main loop where we read messages from the peer.
-    loop {
+    while !state.pieces_to_download.is_empty() {
         match Message::parse(&mut stream) {
             Ok(message) => {
-                println!("Received message: {:?}", message);
-
                 match message {
-                    Message::Bitfield(bitfield) => {
-                        println!("Received bitfield. Peer has pieces.");
-                        peer_bitfield = Some(bitfield);
+                    Message::Unchoke => peer_choked = false,
+                    Message::Bitfield(bf) => peer_bitfield = Some(bf),
+                    Message::Piece { index, begin, block } => {
+                        if index as usize == state.current_piece_index {
+                            let block_start = begin as usize;
+                            let block_end = block_start + block.len();
+                            state.current_piece_data[block_start..block_end].copy_from_slice(&block);
+                            state.blocks_received += 1;
 
-                        // Now that we have their bitfield, tell them we're interested.
-                        let interested_msg = Message::Interested;
-                        stream.write_all(&interested_msg.serialize())?;
-                        println!("Sent 'Interested' message.");
-                    }
-                    Message::Unchoke => {
-                        println!("Peer unchoked us! We can now request pieces.");
-                        peer_choked = false;
-                    }
-                    Message::Piece {
-                        index,
-                        begin,
-                        block,
-                    } => {
-                        println!("Received block for piece {} at offset {}", index, begin);
-                        // In a real client, you would save this block to a file.
-                        // For now, we'll just print its size.
-                        println!("Block size: {}", block.len());
+                            // We need to know the torrent's piece_length to calculate when a piece is complete.
+                            // We can get this from the state's internal reference to the Info struct.
+                            let piece_length = state.get_info().piece_length as u32;
+                            let num_blocks_in_piece = (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-                        // Here you would check if you have all blocks for the piece.
-                        // If so, you'd verify the hash. If the hash is good, you are done!
-                        // For this example, we'll just exit after receiving one block.
-                        println!("\nSUCCESS! DOWNLOADED OUR FIRST BLOCK.");
-                        return Ok(());
+                            if state.blocks_received == num_blocks_in_piece as usize {
+                                // The call to verify now passes the file_handles and mapper.
+                                if state.verify_and_save_current_piece(file_handles, mapper)? {
+                                    state.prepare_for_next_piece();
+                                } else {
+                                    state.current_piece_data.fill(0);
+                                    state.blocks_received = 0;
+                                }
+                            }
+                        }
                     }
-                    // We can ignore many messages for now
-                    Message::Choke => peer_choked = true,
-                    _ => {}
+                    _ => {} // Ignore other messages for now
                 }
             }
-            Err(e) => {
-                // If there's an error, the connection likely dropped.
-                return Err(format!("Error reading message from peer: {}", e).into());
+            Err(e) => return Err(format!("Error reading message from peer: {}", e).into()),
+        }
+
+        if !peer_choked {
+            if let Some(bf) = &peer_bitfield {
+                let byte_index = state.current_piece_index / 8;
+                let bit_index = state.current_piece_index % 8;
+                if let Some(&byte) = bf.get(byte_index) {
+                    if (byte >> (7 - bit_index)) & 1 != 0 {
+                        // The peer has the piece we want.
+                        let piece_length = state.get_info().piece_length as u32;
+                        let next_block_offset = (state.blocks_received as u32) * BLOCK_SIZE;
+
+                        if next_block_offset < piece_length {
+                            let remaining_bytes = piece_length - next_block_offset;
+                            let block_length = if remaining_bytes < BLOCK_SIZE {
+                                remaining_bytes
+                            } else {
+                                BLOCK_SIZE
+                            };
+                            
+                            let request_msg = Message::Request {
+                                index: state.current_piece_index as u32,
+                                begin: next_block_offset,
+                                length: block_length,
+                            };
+                            stream.write_all(&request_msg.serialize())?;
+                        }
+                    }
+                }
             }
         }
-
-        // If we are unchoked and we know what pieces the peer has,
-        // we can send a request for a block.
-        if !peer_choked && peer_bitfield.is_some() {
-            // Let's request the first block of the first piece.
-            // A standard block size is 16 KiB (16384 bytes).
-            let block_size = 16384;
-
-            // This is a simplified request for the very first block.
-            // A real client would have a sophisticated piece selection strategy.
-            println!("Requesting block from peer...");
-            let request_msg = Message::Request {
-                index: 0,
-                begin: 0,
-                length: block_size,
-            };
-            stream.write_all(&request_msg.serialize())?;
-
-            // TODO : get all pieces, not just 1
-        }
     }
+
+    println!("\nDOWNLOAD SESSION COMPLETE (with this peer).");
+    Ok(())
 }

@@ -80,7 +80,7 @@ impl Message {
     pub fn serialize(&self) -> Vec<u8> {
         match self {
             Message::KeepAlive => u32::to_be_bytes(0).to_vec(),
-            
+
             // --- CORRECTED SIMPLE MESSAGES ---
             Message::Choke => {
                 let mut bytes = Vec::with_capacity(5);
@@ -107,7 +107,6 @@ impl Message {
                 bytes
             }
             // --- END CORRECTION ---
-
             Message::Have(index) => {
                 let mut bytes = Vec::with_capacity(9);
                 bytes.extend_from_slice(&u32::to_be_bytes(5)); // Length prefix (1 for ID + 4 for index)
@@ -115,7 +114,11 @@ impl Message {
                 bytes.extend_from_slice(&index.to_be_bytes());
                 bytes
             }
-            Message::Request { index, begin, length } => {
+            Message::Request {
+                index,
+                begin,
+                length,
+            } => {
                 let mut bytes = Vec::with_capacity(17);
                 bytes.extend_from_slice(&u32::to_be_bytes(13)); // Length prefix (1 for ID + 12 for payload)
                 bytes.push(6); // Message ID

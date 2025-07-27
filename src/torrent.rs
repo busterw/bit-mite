@@ -4,9 +4,12 @@ use super::bencode::{BencodeError, BencodeValue};
 
 use rand::Rng;
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum TorrentParseError {
@@ -39,9 +42,10 @@ pub struct Torrent {
 
 #[derive(Debug, Clone)]
 pub struct Info {
-    pub name: String,
+    pub name: String, // name of file (single) or directory (multi)
     pub piece_length: i64,
     pub pieces: Vec<Vec<u8>>,
+    pub mode: InfoMode,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +58,33 @@ pub struct Peer {
 pub struct AnnounceResponse {
     pub peers: Vec<Peer>,
     pub interval: i64, // The number of seconds the client should wait before re-announcing.
+}
+
+#[derive(Debug)]
+pub struct DownloadState<'a> {
+    pub info: &'a Info,
+    pub pieces_to_download: Vec<usize>,
+    pub current_piece_index: usize,
+    pub current_piece_data: Vec<u8>,
+    pub blocks_received: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileInfo {
+    pub path: std::path::PathBuf, // Using PathBuf for proper path handling
+    pub length: i64,
+}
+
+#[derive(Debug, Clone)]
+pub enum InfoMode {
+    SingleFile { length: i64 },
+    MultiFile { files: Vec<FileInfo> },
+}
+
+#[derive(Debug)]
+pub struct FileMapper {
+    // A pre-computed list of (global_start_offset, FileInfo)
+    file_offsets: Vec<(u64, FileInfo)>,
 }
 
 impl Peer {
@@ -81,21 +112,48 @@ impl Torrent {
                 let name = get_string(&mut info_dict, b"name")?;
                 let piece_length = get_integer(&mut info_dict, b"piece length")?;
                 let pieces_bytes = get_bytes(&mut info_dict, b"pieces")?;
+                let pieces = pieces_bytes.chunks(20).map(|c| c.to_vec()).collect();
 
-                if pieces_bytes.len() % 20 != 0 {
-                    return Err(TorrentParseError::InvalidType(
-                        "pieces length not divisible by 20".to_string(),
-                    ));
-                }
-                let pieces = pieces_bytes
-                    .chunks(20)
-                    .map(|chunk| chunk.to_vec())
-                    .collect();
+                // --- THIS IS THE NEW LOGIC FOR DETECTING THE MODE ---
+                let mode = if let Some(BencodeValue::List(files_list)) =
+                    info_dict.remove(&b"files".to_vec())
+                {
+                    // MULTI-FILE MODE
+                    let mut files = Vec::new();
+                    for file_val in files_list {
+                        if let BencodeValue::Dictionary(mut file_dict) = file_val {
+                            let length = get_integer(&mut file_dict, b"length")?;
+                            // The path is a list of byte-strings
+                            let path_list = match file_dict.remove(&b"path".to_vec()) {
+                                Some(BencodeValue::List(p)) => p,
+                                _ => {
+                                    return Err(TorrentParseError::InvalidType(
+                                        "file path".to_string(),
+                                    ));
+                                }
+                            };
+                            let mut path = std::path::PathBuf::new();
+                            for part_val in path_list {
+                                if let BencodeValue::Bytes(part_bytes) = part_val {
+                                    path.push(String::from_utf8(part_bytes).unwrap());
+                                }
+                            }
+                            files.push(FileInfo { path, length });
+                        }
+                    }
+                    InfoMode::MultiFile { files }
+                } else {
+                    // SINGLE-FILE MODE
+                    let length = get_integer(&mut info_dict, b"length")?;
+                    InfoMode::SingleFile { length }
+                };
+                // --- END NEW LOGIC ---
 
                 Info {
                     name,
                     piece_length,
                     pieces,
+                    mode,
                 }
             } else {
                 return Err(TorrentParseError::InvalidInfo);
@@ -221,6 +279,112 @@ impl Torrent {
             .collect();
 
         Ok(peers)
+    }
+}
+
+impl<'a> DownloadState<'a> {
+    pub fn new(info: &'a Info) -> Self {
+        let pieces_to_download: Vec<usize> = (0..info.pieces.len()).collect();
+        Self {
+            info,
+            current_piece_index: *pieces_to_download.first().unwrap_or(&0),
+            pieces_to_download,
+            current_piece_data: vec![0; info.piece_length as usize],
+            blocks_received: 0,
+        }
+    }
+
+    pub fn get_info(&self) -> &'a Info {
+        self.info
+    }
+
+    /// Verifies the SHA-1 hash of the currently assembled piece.
+    pub fn verify_and_save_current_piece(
+        &mut self,
+        file_handles: &mut HashMap<PathBuf, File>, // Map of paths to open file handles
+        mapper: &FileMapper,                     // Our new mapping helper
+    ) -> Result<bool, std::io::Error> {
+        let piece_slice = &self.current_piece_data[..];
+        let expected_hash = &self.info.pieces[self.current_piece_index];
+        let actual_hash = sha1_smol::Sha1::from(piece_slice).digest().bytes();
+
+        if actual_hash != expected_hash.as_slice() {
+            eprintln!("ERROR: Piece #{} failed hash check.", self.current_piece_index);
+            return Ok(false);
+        }
+
+        println!("SUCCESS: Piece #{} passed hash check.", self.current_piece_index);
+        let piece_offset = self.current_piece_index as u64 * self.info.piece_length as u64;
+
+        // --- NEW LOGIC: Writing the piece data correctly ---
+        match &self.info.mode {
+            InfoMode::SingleFile { .. } => {
+                // For single-file mode, the logic is simple.
+                let file_path = PathBuf::from(&self.info.name);
+                let file = file_handles.get_mut(&file_path).unwrap();
+                file.seek(SeekFrom::Start(piece_offset))?;
+                file.write_all(piece_slice)?;
+            }
+            InfoMode::MultiFile { .. } => {
+                // For multi-file mode, we use the mapper.
+                let mut bytes_written = 0;
+                for (file_start_offset, file_info) in &mapper.file_offsets {
+                    // Check if this piece overlaps with this file at all
+                    let file_end_offset = file_start_offset + file_info.length as u64;
+                    if piece_offset >= file_end_offset || piece_offset + piece_slice.len() as u64 <= *file_start_offset {
+                        continue; // No overlap
+                    }
+
+                    // Find the slice of the piece that belongs to this file
+                    let write_start = std::cmp::max(piece_offset, *file_start_offset);
+                    let write_end = std::cmp::min(piece_offset + piece_slice.len() as u64, file_end_offset);
+                    let data_start = (write_start - piece_offset) as usize;
+                    let data_end = (write_end - piece_offset) as usize;
+                    let data_to_write = &piece_slice[data_start..data_end];
+
+                    // Write that slice to the correct offset in the file
+                    let file_offset = write_start - file_start_offset;
+                    let file = file_handles.get_mut(&file_info.path).unwrap();
+                    file.seek(SeekFrom::Start(file_offset))?;
+                    file.write_all(data_to_write)?;
+                    
+                    bytes_written += data_to_write.len();
+                }
+                println!("Piece #{} written to disk ({} bytes across files).", self.current_piece_index, bytes_written);
+            }
+        }
+        Ok(true)
+    } 
+    
+
+    /// Resets the state to prepare for downloading the next piece.
+    pub fn prepare_for_next_piece(&mut self) {
+        self.pieces_to_download
+            .retain(|&p| p != self.current_piece_index);
+
+        // --- FIX: Re-allocate the buffer for the next piece ---
+        self.current_piece_data = vec![0; self.info.piece_length as usize];
+        // ---
+        self.blocks_received = 0;
+
+        if let Some(&next_piece) = self.pieces_to_download.first() {
+            self.current_piece_index = next_piece;
+        }
+    }
+}
+
+impl FileMapper {
+    pub fn new(info: &Info) -> Self {
+        let mut file_offsets = Vec::new();
+        let mut current_offset = 0;
+
+        if let InfoMode::MultiFile { files } = &info.mode {
+            for file_info in files {
+                file_offsets.push((current_offset, file_info.clone()));
+                current_offset += file_info.length as u64;
+            }
+        }
+        Self { file_offsets }
     }
 }
 
