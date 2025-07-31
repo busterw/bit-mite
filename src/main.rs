@@ -9,7 +9,10 @@ fn main() {
     match Magnet::from_uri(magnet_link) {
         Ok(magnet) => {
             println!("Successfully parsed magnet link!");
-            println!("  Display Name: {}", magnet.display_name.unwrap_or_else(|| "N/A".to_string()));
+            println!(
+                "  Display Name: {}",
+                magnet.display_name.unwrap_or_else(|| "N/A".to_string())
+            );
             println!("  Info Hash: {}", hex::encode(magnet.info_hash));
             println!("  Trackers:");
             if magnet.trackers.is_empty() {
