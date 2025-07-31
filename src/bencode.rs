@@ -101,3 +101,33 @@ fn decode_dictionary(encoded_value: &[u8]) -> Result<(BencodeValue, &[u8]), Benc
     }
     Ok((BencodeValue::Dictionary(dict), &remaining[1..])) // Skip 'e'
 }
+
+impl BencodeValue {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            BencodeValue::Bytes(bytes) => {
+                let mut res = format!("{}:", bytes.len()).into_bytes();
+                res.extend_from_slice(bytes);
+                res
+            }
+            BencodeValue::Integer(i) => format!("i{}e", i).into_bytes(),
+            BencodeValue::List(list) => {
+                let mut res = vec![b'l'];
+                for val in list {
+                    res.extend_from_slice(&val.to_bytes());
+                }
+                res.push(b'e');
+                res
+            }
+            BencodeValue::Dictionary(dict) => {
+                let mut res = vec![b'd'];
+                for (key, val) in dict {
+                    res.extend_from_slice(&BencodeValue::Bytes(key.clone()).to_bytes());
+                    res.extend_from_slice(&val.to_bytes());
+                }
+                res.push(b'e');
+                res
+            }
+        }
+    }
+}
