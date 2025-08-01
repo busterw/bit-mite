@@ -12,11 +12,8 @@ pub mod tracker;
 
 use crate::magnet::Magnet;
 use crate::peer::GlobalState;
-use crate::torrent::PieceManager;
 use futures::future::join_all;
-use rand::{Rng, RngCore};
-use std::fs;
-use std::path::PathBuf;
+use rand::RngCore;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -60,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         if downloaded_pieces == total_pieces && total_pieces > 0 {
             println!("\n✅ Download complete! All {} pieces verified.", total_pieces);
-            match manager.write_to_disk(&torrent) {
+            match manager.write_to_disk(torrent) {
                 Ok(_) => println!("   Files written successfully to './downloads/{}'", torrent.name),
                 Err(e) => eprintln!("   Error writing files to disk: {}", e),
             }

@@ -5,7 +5,7 @@ use sha1::{Digest, Sha1};
 use std::fs::{self, File};
 use std::path::PathBuf;
 use std::io::{Seek, SeekFrom, Write}; 
-use std::sync::Arc; 
+ 
 
 // Standard block size is 2^14 bytes, or 16KiB.
 pub const BLOCK_SIZE: u32 = 16384;
@@ -237,7 +237,7 @@ impl PieceManager {
                 
                 let data_to_write = &piece_data[start_in_piece_data..end_in_piece_data];
                 
-                let mut file = &mut file_handles[file_index];
+                let file = &mut file_handles[file_index];
                 file.seek(SeekFrom::Start(offset_in_file))?;
                 file.write_all(data_to_write)?;
             }

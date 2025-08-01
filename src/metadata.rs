@@ -14,7 +14,7 @@ pub struct MetadataDownloader {
 
 impl MetadataDownloader {
     pub fn new(info_hash: [u8; 20], size: usize) -> Self {
-        let num_pieces = (size + METADATA_BLOCK_SIZE - 1) / METADATA_BLOCK_SIZE;
+        let num_pieces = size.div_ceil(METADATA_BLOCK_SIZE);
         Self {
             info_hash,
             size,

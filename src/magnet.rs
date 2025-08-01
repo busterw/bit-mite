@@ -18,9 +18,9 @@ impl Magnet {
         let params: HashMap<&str, Vec<&str>> = params_str
             .split('&')
             .filter_map(|p| {
-                let mut parts = p.splitn(2, '=');
-                let key = parts.next()?;
-                let value = parts.next()?;
+                let (key, value) = p.split_once('=')?;
+                
+                
                 Some((key, value))
             })
             .fold(HashMap::new(), |mut acc, (k, v)| {

@@ -188,21 +188,19 @@ impl PeerConnection {
                     let m = dict.get(&b"m"[..]).and_then(|v| v.as_dict()).map(|m_dict| m_dict.iter().filter_map(|(k, v)| v.as_integer().map(|id| (k.clone(), id))).collect()).unwrap_or_default();
                     let metadata_size = dict.get(&b"metadata_size"[..]).and_then(|v| v.as_integer());
                     Message::Extended(ExtendedMessage::Handshake { m, metadata_size })
-                } else {
-                    if let Ok((bencoded_part, remaining_data)) = crate::bencode::decode(bencode_payload) {
-                        let dict = bencoded_part.as_dict().ok_or(std::io::ErrorKind::InvalidData)?;
-                        let msg_type = dict.get(&b"msg_type"[..]).and_then(|v| v.as_integer()).ok_or(std::io::ErrorKind::InvalidData)?;
-                        let piece = dict.get(&b"piece"[..]).and_then(|v| v.as_integer()).ok_or(std::io::ErrorKind::InvalidData)?;
-                        match msg_type {
-                            1 => {
-                                let total_size = dict.get(&b"total_size"[..]).and_then(|v| v.as_integer()).unwrap_or(0);
-                                Message::Extended(ExtendedMessage::MetadataPiece { piece, total_size, data: remaining_data.to_vec() })
-                            }
-                            2 => Message::Extended(ExtendedMessage::MetadataReject { piece }),
-                            _ => return Ok(None),
+                } else if let Ok((bencoded_part, remaining_data)) = crate::bencode::decode(bencode_payload) {
+                    let dict = bencoded_part.as_dict().ok_or(std::io::ErrorKind::InvalidData)?;
+                    let msg_type = dict.get(&b"msg_type"[..]).and_then(|v| v.as_integer()).ok_or(std::io::ErrorKind::InvalidData)?;
+                    let piece = dict.get(&b"piece"[..]).and_then(|v| v.as_integer()).ok_or(std::io::ErrorKind::InvalidData)?;
+                    match msg_type {
+                        1 => {
+                            let total_size = dict.get(&b"total_size"[..]).and_then(|v| v.as_integer()).unwrap_or(0);
+                            Message::Extended(ExtendedMessage::MetadataPiece { piece, total_size, data: remaining_data.to_vec() })
                         }
-                    } else { return Ok(None); }
-                }
+                        2 => Message::Extended(ExtendedMessage::MetadataReject { piece }),
+                        _ => return Ok(None),
+                    }
+                } else { return Ok(None); }
             }
             _ => return Ok(None),
         };
@@ -514,7 +512,7 @@ pub async fn run_session(
                         if manager.is_complete() { break; } // Our download is done.
 
                         // Request a block if we need one.
-                        if let Some(block_req) = manager.get_block_to_request(&torrent, bitfield) {
+                        if let Some(block_req) = manager.get_block_to_request(torrent, bitfield) {
                             let begin = block_req.block_index as u32 * BLOCK_SIZE;
                             let msg = Message::Request { index: block_req.piece_index as u32, begin, length: block_req.length };
                             drop(manager); // Drop lock before I/O
