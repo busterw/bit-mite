@@ -1,18 +1,14 @@
 use std::collections::HashMap;
 
-/// Represents the data parsed from a magnet link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Magnet {
-    /// The 20-byte SHA-1 hash of the bencoded info dictionary.
+    /// The 20-byte SHA-1 hash of the bencoded info dictionary
     pub info_hash: [u8; 20],
-    /// The display name of the torrent.
     pub display_name: Option<String>,
-    /// A list of tracker URLs.
     pub trackers: Vec<String>,
 }
 
 impl Magnet {
-    /// Parses a magnet link URI string into a `Magnet` struct.
     pub fn from_uri(uri: &str) -> Result<Self, &'static str> {
         if !uri.starts_with("magnet:?") {
             return Err("Invalid magnet URI: Must start with 'magnet:?'");
@@ -52,11 +48,8 @@ impl Magnet {
         info_hash.copy_from_slice(&info_hash_bytes);
 
         let display_name = params.get("dn").and_then(|v| v.first()).and_then(|s| {
-            // Manually replace '+' with ' ' to handle form-style encoding.
+            // Manually replace '+' with ' ' to handle form-style encoding
             let s_with_spaces = s.replace('+', " ");
-            // `decode` returns a `Result<Cow<str>, _>`.
-            // We map the `Cow` to an owned `String` *inside* the closure
-            // to ensure the value's lifetime is not tied to `s_with_spaces`.
             urlencoding::decode(&s_with_spaces)
                 .ok()
                 .map(|cow| cow.into_owned())
