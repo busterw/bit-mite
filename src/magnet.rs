@@ -19,8 +19,7 @@ impl Magnet {
             .split('&')
             .filter_map(|p| {
                 let (key, value) = p.split_once('=')?;
-                
-                
+
                 Some((key, value))
             })
             .fold(HashMap::new(), |mut acc, (k, v)| {

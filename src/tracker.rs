@@ -242,8 +242,8 @@ pub fn announce(tracker_url: &str, info_hash: [u8; 20]) -> Result<TrackerRespons
     Ok(TrackerResponse { interval, peers })
 }
 
-pub async fn find_peers(magnet: &Magnet) -> Result<(Vec<Peer>, Duration), Box<dyn std::error::Error>> {
-        for tracker_url in &magnet.trackers {
+pub async fn find_peers(magnet: &Magnet) -> Result<(Vec<Peer>, Duration), Box<dyn std::error::Error + Send + Sync>> {
+    for tracker_url in &magnet.trackers {
         let response_result = if tracker_url.starts_with("http") {
             // TODO: Replace with non-blocking
             tokio::task::block_in_place(move || announce(tracker_url, magnet.info_hash))
@@ -253,12 +253,12 @@ pub async fn find_peers(magnet: &Magnet) -> Result<(Vec<Peer>, Duration), Box<dy
             eprintln!("  > Skipping unsupported tracker protocol: {}", tracker_url);
             continue;
         };
-        
+
         match response_result {
             Ok(response) => {
                 let interval = Duration::from_secs(response.interval as u64);
                 return Ok((response.peers, interval));
-           }
+            }
             Err(e) => {
                 eprintln!("    > Announce to {} failed: {}", tracker_url, e);
             }
