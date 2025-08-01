@@ -78,6 +78,7 @@ struct PeerState {
     peer_choking: bool,
     peer_interested: bool,
     bitfield: Option<Vec<u8>>,
+    pending_blocks: Vec<BlockInfo>, 
 }
 pub struct PeerConnection {
     stream: TcpStream,
@@ -301,6 +302,17 @@ impl PeerConnection {
     }
 }
 
+impl GlobalState {
+    pub fn is_content_complete(&self) -> bool {
+        if let GlobalState::ContentDownload(_, manager_mutex) = self {
+            let manager = manager_mutex.blocking_lock();
+            manager.is_complete()
+        } else {
+            false
+        }
+    }
+}
+
 pub async fn connect(
     peer: tracker::Peer,
     info_hash: [u8; 20],
@@ -464,70 +476,97 @@ pub async fn run_session(
     info_hash: [u8; 20],
     shared_state: Arc<Mutex<GlobalState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    
-    // Perform initial handshakes to get peer capabilities.
+
+    // --- Phase 1: Handshakes and State Initialization ---
     let peer_handshake_result = connection.perform_handshakes().await?;
+    let ut_metadata_id = peer_handshake_result.ut_metadata_id;
+    let metadata_size = peer_handshake_result.metadata_size;
     
+    // --- Initialize the state for this specific peer connection ---
     let mut local_peer_state = PeerState {
         am_choking: true,
         am_interested: false,
         peer_choking: true,
         peer_interested: false,
         bitfield: None,
+        pending_blocks: Vec::new(),
     };
 
-    // Main loop for the entire life of the peer connection.
-    loop {
-        // --- Lock and determine current global state ---
-        let current_global_state = shared_state.lock().await.clone();
-
-        // --- Act based on current state ---
-        match &current_global_state {
-            GlobalState::MetadataPending => {
-                if let (Some(id), Some(size)) = (peer_handshake_result.ut_metadata_id, peer_handshake_result.metadata_size) {
-                    let mut state = shared_state.lock().await;
-                    // Check again now that we have the lock, to avoid a race condition.
-                    if let GlobalState::MetadataPending = *state {
-                        *state = GlobalState::MetadataInProgress;
-                        drop(state); // Drop the lock before await
-
-                        let metadata = connection.download_metadata_from_peer(info_hash, id, size).await?;
-                        let torrent = Arc::new(Torrent::new(&metadata, info_hash)?);
-                        let manager = Arc::new(Mutex::new(PieceManager::new(&torrent)));
-
-                        println!("  > ✅ Peer completed metadata download.");
-                        *shared_state.lock().await = GlobalState::ContentDownload(torrent, manager);
-                    }
-                }
-            }
-            GlobalState::ContentDownload(torrent, manager_mutex) => {
-                if !local_peer_state.am_interested {
-                    connection.send_message(Message::Interested, None).await?;
-                    local_peer_state.am_interested = true;
-                }
-                
-                if !local_peer_state.peer_choking {
-                    if let Some(bitfield) = &local_peer_state.bitfield {
-                        let mut manager = manager_mutex.lock().await;
-                        if manager.is_complete() { break; } // Our download is done.
-
-                        // Request a block if we need one.
-                        if let Some(block_req) = manager.get_block_to_request(torrent, bitfield) {
-                            let begin = block_req.block_index as u32 * BLOCK_SIZE;
-                            let msg = Message::Request { index: block_req.piece_index as u32, begin, length: block_req.length };
-                            drop(manager); // Drop lock before I/O
-                            connection.send_message(msg, None).await?;
-                        }
-                    }
-                }
-            }
-            GlobalState::MetadataInProgress => {
-                // Another peer is downloading metadata. We just wait patiently.
+    // Check if another task has already completed metadata download.
+    let mut am_metadata_downloader = false;
+    { 
+        let mut state = shared_state.lock().await;
+        if let GlobalState::MetadataPending = *state {
+            if let (Some(_), Some(_)) = (ut_metadata_id, metadata_size) {
+                *state = GlobalState::MetadataInProgress;
+                am_metadata_downloader = true;
             }
         }
+    } 
+    if am_metadata_downloader {
+        let metadata = connection.download_metadata_from_peer(info_hash, ut_metadata_id.unwrap(), metadata_size.unwrap()).await?;
+        let torrent = Arc::new(Torrent::new(&metadata, info_hash)?);
+        let manager = Arc::new(Mutex::new(PieceManager::new(&torrent)));
+        *shared_state.lock().await = GlobalState::ContentDownload(torrent, manager);
+        println!("  > ✅ This peer completed metadata download.");
+    }
+    
+    // Set a long timeout for the overall session.
+    let session_timeout = Duration::from_secs(180); 
+    let start_time = std::time::Instant::now();
+
+    // --- The Main Event Loop ---
+    while start_time.elapsed() < session_timeout {
+        
+        // --- Lock and determine current global state ---
+        let global_state = shared_state.lock().await.clone();
+
+        if let GlobalState::ContentDownload(torrent, manager_mutex) = &global_state {
+            // We have the metadata, we are now in the content download phase.
+
+            // 1. Express interest if we haven't already.
+            if !local_peer_state.am_interested {
+                connection.send_message(Message::Interested, None).await?;
+                local_peer_state.am_interested = true;
+            }
+
+            // 2. Fill the pipeline with new block requests.
+            if !local_peer_state.peer_choking {
+                if let Some(bitfield) = &local_peer_state.bitfield {
+                    let block_req_to_send = { // Create a new scope
+                        let mut manager = manager_mutex.lock().await;
+                        if manager.is_complete() { break; }
+                        manager.get_block_to_request(&torrent, bitfield)
+                    }; // The manager lock is dropped here as `manager` goes out of scope
+    
+                    // Now we are free to await on I/O without holding the lock.
+                    if let Some(block_req) = block_req_to_send {
+                        let begin = block_req.block_index as u32 * BLOCK_SIZE;
+                        let msg = Message::Request { index: block_req.piece_index as u32, begin, length: block_req.length };
+                        connection.send_message(msg, None).await?;
+                    }
+                }
+            }
+
+            // Check if our work here is done (all pending blocks are received, and no more to request)
+            if local_peer_state.pending_blocks.is_empty() {
+                 let manager = manager_mutex.lock().await;
+                 if manager.is_complete() {
+                     println!("  > Download is complete. Closing session with this peer.");
+                     break;
+                 }
+            }
+        
+        } else {
+            // Metadata is still pending or in progress by another peer. Wait patiently.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue; // Skip to the next iteration to re-check the global state.
+        }
+
 
         // --- React to incoming messages ---
-        let maybe_msg = tokio::time::timeout(Duration::from_secs(30), connection.read_message()).await;
+        // We use a shorter timeout for receiving messages to keep the loop spinning.
+        let maybe_msg = tokio::time::timeout(Duration::from_secs(10), connection.read_message()).await;
         if let Ok(Ok(Some(msg))) = maybe_msg {
             match msg {
                 Message::Choke => local_peer_state.peer_choking = true,
@@ -542,27 +581,35 @@ pub async fn run_session(
                     }
                 }
                 Message::Piece { index, begin, block } => {
+                    let block_index = (begin / BLOCK_SIZE) as usize;
+
+                    // Remove the completed request from our pending queue
+                    if let Some(pos) = local_peer_state.pending_blocks.iter().position(|b| b.piece_index == index as usize && b.block_index == block_index) {
+                        local_peer_state.pending_blocks.remove(pos);
+                    }
+
                     if let GlobalState::ContentDownload(_, manager_mutex) = &*shared_state.lock().await {
                         let mut manager = manager_mutex.lock().await;
-                        let block_info = BlockInfo { piece_index: index as usize, block_index: (begin / BLOCK_SIZE) as usize, length: block.len() as u32 };
+                        let block_info = BlockInfo { piece_index: index as usize, block_index, length: block.len() as u32 };
                         if manager.add_block(&block_info, block) {
                             let piece_data = manager.pieces[index as usize].assemble();
                             if manager.pieces[index as usize].verify(&piece_data) {
                                 manager.pieces[index as usize].state = crate::torrent::PieceState::Have;
                                 println!("  > ✅ Piece #{} is VALID. ({}/{})", index, manager.count_have_pieces(), manager.pieces.len());
                             } else {
-                                // Reset the piece so we can request it again.
                                 manager.reset_piece(index as usize);
                             }
                         }
                     }
                 }
-                _ => {} // Ignore other messages for now
+                _ => {} 
             }
-        } else {
-            // Peer closed connection or timed out
+        } else if let Ok(Ok(None)) = maybe_msg {
+             // Peer closed the connection cleanly
             break;
         }
+        // If it's a timeout error, we just loop again, which is fine.
     }
+    
     Ok(())
 }
