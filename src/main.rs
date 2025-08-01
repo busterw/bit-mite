@@ -1,3 +1,4 @@
+
 pub mod bencode;
 pub mod magnet;
 pub mod metadata;
@@ -6,116 +7,86 @@ pub mod torrent;
 pub mod tracker;
 
 use crate::magnet::Magnet;
-use crate::torrent::Torrent;
+use crate::torrent::{PieceManager, Torrent};
 use futures::future::join_all;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() {
     let magnet_link = "magnet:?xt=urn:btih:A46191E0C823E42FF8EAED2E6ACB9127383CC190&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969%2Fannounce&tr=udp%3A%2F%2F9.rarbg.to%3A2920%2Fannounce&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Ftracker.internetwarriors.net%3A1337%2Fannounce&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.pirateparty.gr%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.cyberia.is%3A6969%2Fannounce";
-
-    println!("Starting BitTorrent client...");
-
-    let shared_torrent: Arc<Mutex<Option<Arc<Torrent>>>> = Arc::new(Mutex::new(None));
+    println!("Starting BitTorrent client for magnet link...");
 
     let magnet = match Magnet::from_uri(magnet_link) {
-        Ok(m) => {
-            println!(
-                "Parsed magnet link for info_hash: {}",
-                hex::encode(m.info_hash)
-            );
-            m
-        }
+        Ok(m) => m,
         Err(e) => {
             eprintln!("Error: Could not parse magnet link. {}", e);
             return;
         }
     };
-
+    
     let our_peer_id = {
         let mut id = [0u8; 20];
-        // "RS" for Rust, "0001" for version (some clients probably won't like this, so we might have to fake being a different client at some point)
         id[0..8].copy_from_slice(b"-RS0001-");
         rand::thread_rng().fill_bytes(&mut id[8..]);
         id
     };
 
     println!("\nContacting trackers to find peers...");
-    let mut peer_list: Option<Vec<tracker::Peer>> = None;
-    for tracker_url in &magnet.trackers {
-        println!("  - Announcing to {}", tracker_url);
-        let response = if tracker_url.starts_with("http") {
-            tracker::announce(tracker_url, magnet.info_hash)
-        } else if tracker_url.starts_with("udp") {
-            tracker::announce_udp(tracker_url, magnet.info_hash)
-        } else {
-            eprintln!("    > Skipping unsupported tracker protocol.");
-            continue;
-        };
-
-        match response {
-            Ok(res) => {
-                println!("    > Success! Got {} peers from tracker.", res.peers.len());
-                peer_list = Some(res.peers);
-                break; // We have a peer list, no need to contact more trackers.
-            }
-            Err(e) => {
-                eprintln!("    > Failed to announce: {}", e);
-            }
+    let peers = match tracker::find_peers(&magnet).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: Could not find peers from trackers. {}", e);
+            return;
         }
-    }
-
-    let Some(peers) = peer_list else {
-        println!("\nCould not retrieve a peer list from any trackers. Exiting.");
-        return;
     };
+    println!("  > Found {} potential peers.", peers.len());
 
-    println!("\nStarting peer sessions...");
-
-    let mut tasks = vec![];
-    for p in peers {
-        let shared_torrent_clone = shared_torrent.clone();
-
-        let task = tokio::spawn(async move {
-            let peer_ip = p.ip;
-            let peer_port = p.port;
-
-            match peer::connect(p, magnet.info_hash, our_peer_id).await {
-                Ok(connection) => {
-                    println!(
-                        "  > [Peer {}:{}] ✅ Handshake complete.",
-                        peer_ip, peer_port
-                    );
-
-                    if let Err(e) =
-                        peer::run_session(connection, magnet.info_hash, shared_torrent_clone).await
-                    {
-                        eprintln!("    [Peer {}:{}] Session Error: {}", peer_ip, peer_port, e);
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  > [Peer {}:{}] ❌ Failed to connect: {}",
-                        peer_ip, peer_port, e
-                    );
-                }
+    println!("\nStage 1: Acquiring Torrent Metadata...");
+    let shared_torrent_metadata: Arc<Mutex<Option<Arc<Torrent>>>> = Arc::new(Mutex::new(None));
+    
+    let mut metadata_tasks = vec![];
+    for p in &peers {
+        let shared_torrent_clone = shared_torrent_metadata.clone();
+        let peer = p.clone();
+        
+        metadata_tasks.push(tokio::spawn(async move {
+            if let Ok(connection) = peer::connect(peer, magnet.info_hash, our_peer_id).await {
+                let _ = peer::download_metadata(connection, magnet.info_hash, shared_torrent_clone).await;
             }
-        });
-        tasks.push(task);
+        }));
     }
+    join_all(metadata_tasks).await;
 
-    join_all(tasks).await;
+    let torrent = {
+        let lock = shared_torrent_metadata.lock().await;
+        if lock.is_none() {
+            println!("\n❌ Failure. Could not download torrent metadata from any peer. Exiting.");
+            return;
+        }
+        lock.clone().unwrap()
+    };
+    println!("\n✅ Success! Metadata downloaded for '{}'.", torrent.name);
 
-    if let Some(torrent) = &*shared_torrent.lock().await {
-        println!("\n✅ Success! Metadata downloaded and verified.");
-        println!("   Torrent Name: {}", torrent.name);
-    } else {
-        println!(
-            "\n❌ Failure. Could not download torrent metadata from any of the connected peers."
-        );
+    println!("\nStage 2: Downloading File Content...");
+    let piece_manager = Arc::new(Mutex::new(PieceManager::new(&torrent)));
+    
+    let mut content_tasks = vec![];
+    for p in peers {
+        let torrent_clone = torrent.clone();
+        let manager_clone = piece_manager.clone();
+
+        content_tasks.push(tokio::spawn(async move {
+            if let Ok(connection) = peer::connect(p, torrent_clone.info_hash, our_peer_id).await {
+                let _ = peer::download_content(connection, torrent_clone, manager_clone).await;
+            }
+        }));
     }
+    join_all(content_tasks).await;
+
+    println!("\n✅ File download phase complete!");
 }
+
 //let torrent_file = "/home/buster/Downloads/scifiarchivum_archive.torrent"
 //"magnet:?xt=urn:btih:A46191E0C823E42FF8EAED2E6ACB9127383CC190&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969%2Fannounce&tr=udp%3A%2F%2F9.rarbg.to%3A2920%2Fannounce&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Ftracker.internetwarriors.net%3A1337%2Fannounce&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.pirateparty.gr%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.cyberia.is%3A6969%2Fannounce"    ;

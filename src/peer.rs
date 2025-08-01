@@ -1,7 +1,6 @@
 use crate::bencode::BencodeValue;
 use crate::metadata::MetadataDownloader;
-use crate::torrent::Torrent;
-use crate::tracker;
+use crate::torrent::{BlockInfo, PieceManager, Torrent, BLOCK_SIZE};use crate::tracker;
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BytesMut};
 use std::collections::BTreeMap;
@@ -29,21 +28,9 @@ pub enum Message {
     NotInterested,
     Have(u32),
     Bitfield(Vec<u8>),
-    Request {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
-    Piece {
-        index: u32,
-        begin: u32,
-        block: Vec<u8>,
-    },
-    Cancel {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
+    Request { index: u32, begin: u32, length: u32 },
+    Piece { index: u32, begin: u32, block: Vec<u8> },
+    Cancel { index: u32, begin: u32, length: u32 },
     Extended(ExtendedMessage),
 }
 
@@ -303,6 +290,16 @@ impl PeerConnection {
 
                 full_message.extend_from_slice(&(message_body.len() as u32).to_be_bytes());
                 full_message.extend_from_slice(&message_body);
+            },
+            Message::Request { index, begin, length } => {
+                let mut message_body = Vec::new();
+                message_body.push(6); // Message ID for Request
+                message_body.extend_from_slice(&index.to_be_bytes());
+                message_body.extend_from_slice(&begin.to_be_bytes());
+                message_body.extend_from_slice(&length.to_be_bytes());
+
+                full_message.extend_from_slice(&(message_body.len() as u32).to_be_bytes());
+                full_message.extend_from_slice(&message_body);
             }
             _ => {
                 return Ok(());
@@ -335,7 +332,7 @@ pub async fn connect(
     Ok(PeerConnection::new(stream))
 }
 
-pub async fn run_session(
+pub async fn download_metadata(
     mut connection: PeerConnection,
     info_hash: [u8; 20],
     shared_torrent: Arc<Mutex<Option<Arc<Torrent>>>>,
@@ -344,89 +341,106 @@ pub async fn run_session(
         m: BTreeMap::new(),
         metadata_size: None,
     });
-    connection.send_message(our_ext_handshake, None).await?;
-
-    // --- Phase 1: Handshake ---
-    let ext_handshake_msg = connection
-        .read_message()
-        .await?
-        .ok_or("Peer closed connection")?;
-
-    let (ut_metadata_id, metadata_size) =
-        if let Message::Extended(ExtendedMessage::Handshake { m, metadata_size }) =
-            ext_handshake_msg
-        {
-            (m.get(&b"ut_metadata"[..]).copied(), metadata_size)
-        } else {
-            return Err("Expected extended handshake as first message from peer".into());
-        };
-
+    connection.send_message(our_ext_handshake, None).await?;    let ext_handshake_msg = connection.read_message().await?.ok_or("Peer closed connection")?;
+    
+    let (ut_metadata_id, metadata_size) = if let Message::Extended(ExtendedMessage::Handshake { m, metadata_size }) = ext_handshake_msg {
+        (m.get(&b"ut_metadata"[..]).copied(), metadata_size)
+    } else {
+        return Err("Expected extended handshake".into());
+    };
     let (ut_metadata_id, metadata_size) = match (ut_metadata_id, metadata_size) {
         (Some(id), Some(size)) => (id as u8, size as usize),
-        _ => return Err("Peer does not support ut_metadata extension".into()),
+        _ => return Err("Peer does not support ut_metadata".into()),
     };
-    println!(
-        "  > Peer supports metadata exchange! (ut_metadata ID: {}, Size: {} bytes)",
-        ut_metadata_id, metadata_size
-    );
-
-    // --- Phase 2: Politely Request Metadata ---
+    
     let mut downloader = MetadataDownloader::new(info_hash, metadata_size);
     let mut requested_pieces = vec![false; downloader.num_pieces()];
-
+    connection.send_message(Message::Interested, None).await?;
     let mut peer_choking = true;
 
-    // Send an Interested message
-    connection.send_message(Message::Interested, None).await?;
-    let am_interested = true;
-
     loop {
-        // only request pieces if we are interested AND we're not choked
-        if am_interested && !peer_choking {
+        if !peer_choking {
             if let Some(piece_index) = requested_pieces.iter().position(|&r| !r) {
-                let msg = Message::Extended(ExtendedMessage::MetadataRequest {
-                    piece: piece_index as i64,
-                });
+                let msg = Message::Extended(ExtendedMessage::MetadataRequest { piece: piece_index as i64 });
                 connection.send_message(msg, Some(ut_metadata_id)).await?;
                 requested_pieces[piece_index] = true;
             } else if downloader.is_complete() {
                 break;
             }
         }
-
-        let maybe_msg =
-            tokio::time::timeout(Duration::from_secs(30), connection.read_message()).await;
+        let maybe_msg = tokio::time::timeout(Duration::from_secs(10), connection.read_message()).await;
         if let Ok(Ok(Some(message))) = maybe_msg {
             match message {
-                Message::Unchoke => {
-                    println!("  > Got Unchoke! Peer is ready.");
-                    peer_choking = false;
-                }
-                Message::Choke => {
-                    println!("  > Got Choke. Peer is not ready.");
-                    peer_choking = true;
-                }
+                Message::Unchoke => { peer_choking = false; },
+                Message::Choke => { peer_choking = true; },
                 Message::Extended(ExtendedMessage::MetadataPiece { piece, data, .. }) => {
-                    println!("  > Got metadata piece #{}", piece);
                     downloader.add_piece(piece as usize, data);
-                }
+                },
                 _ => {}
             }
         } else {
             return Err("Peer connection timed out or closed.".into());
         }
     }
-
-    // --- Phase 2.5: Verification ---
-    println!("  > Metadata download complete. Verifying...");
+    
     if let Some(info_dict) = downloader.assemble_and_verify() {
-        println!("  > Metadata verified successfully!");
-        let new_torrent = Arc::new(Torrent::new(&info_dict)?);
+        let new_torrent = Arc::new(Torrent::new(&info_dict, info_hash)?);
         *shared_torrent.lock().await = Some(new_torrent);
-    } else {
-        return Err("Metadata verification failed".into());
     }
+    Ok(())
+}
 
-    println!("  > Proceeding to file download phase.");
+pub async fn download_content(
+    mut connection: PeerConnection,
+    torrent: Arc<Torrent>,
+    piece_manager: Arc<Mutex<PieceManager>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Logic from previous step for Phase 3
+    let bitfield_msg = connection.read_message().await?.ok_or("Peer closed connection")?;
+    let peer_bitfield = if let Message::Bitfield(b) = bitfield_msg { b } else { return Err("Expected Bitfield".into()) };
+    connection.send_message(Message::Interested, None).await?;
+    let mut am_choked = true;
+
+    loop {
+        if !am_choked {
+            let mut manager = piece_manager.lock().await;
+            if let Some(block_to_request) = manager.get_block_to_request(&peer_bitfield) {
+                let begin = block_to_request.block_index as u32 * BLOCK_SIZE;
+                let request_msg = Message::Request {
+                    index: block_to_request.piece_index as u32,
+                    begin,
+                    length: block_to_request.length,
+                };
+                drop(manager); // Unlock the mutex before the .await call
+                connection.send_message(request_msg, None).await?;
+            } else {
+                break;
+            }
+        }
+        match tokio::time::timeout(Duration::from_secs(30), connection.read_message()).await {
+            Ok(Ok(Some(message))) => match message {
+                Message::Unchoke => { println!("  > [Content] Got Unchoke from peer."); am_choked = false; },
+                Message::Choke => { am_choked = true; },
+                Message::Piece { index, begin, block } => {
+                    let block_index = (begin / BLOCK_SIZE) as usize;
+                    let block_info = BlockInfo { piece_index: index as usize, block_index, length: block.len() as u32 };
+                    let mut manager = piece_manager.lock().await;
+                    if manager.add_block(&block_info, block) {
+                        println!("  > Piece #{} is complete!", index);
+                        let piece = &manager.pieces[index as usize];
+                        if piece.verify(&piece.assemble()) {
+                             println!("  > ✅ Piece #{} is VALID.", index);
+                             manager.pieces[index as usize].state = crate::torrent::PieceState::Have;
+                        } else {
+                             println!("  > ❌ PIECE #{} IS INVALID. HASH MISMATCH.", index);
+                             manager.pieces[index as usize].state = crate::torrent::PieceState::Needed;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => return Err("Peer connection timed out or closed.".into()),
+        }
+    }
     Ok(())
 }

@@ -1,4 +1,5 @@
 use crate::bencode::BencodeValue;
+use crate::magnet::Magnet;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use rand::{Rng, RngCore};
 use reqwest::blocking::Client;
@@ -50,7 +51,6 @@ pub fn announce_udp(
     tracker_url_str: &str,
     info_hash: [u8; 20],
 ) -> Result<TrackerResponse, TrackerError> {
-    // 1. Parse URL and resolve socket address
     let tracker_url = Url::parse(tracker_url_str).map_err(|_| TrackerError::UdpUrlParse)?;
     let tracker_addr = tracker_url
         .socket_addrs(|| Some(6969))? // Default UDP port if not in URL
@@ -63,16 +63,13 @@ pub fn announce_udp(
             )
         })?;
 
-    // 2. Setup UDP socket and connect
     let socket = UdpSocket::bind("0.0.0.0:0")?; // Bind to any available local port
     socket.connect(tracker_addr)?;
 
-    // Set a timeout for all socket operations
     let timeout = Duration::from_secs(8);
     socket.set_read_timeout(Some(timeout))?;
     socket.set_write_timeout(Some(timeout))?;
 
-    // --- 3. CONNECT PHASE ---
     let conn_trans_id = rand::thread_rng().r#gen::<u32>();
     let mut conn_req_buf = Vec::with_capacity(16);
     conn_req_buf.write_u64::<BigEndian>(0x41727101980)?; // Magic connection_id constant
@@ -81,7 +78,6 @@ pub fn announce_udp(
 
     socket.send(&conn_req_buf)?;
 
-    // --- 4. RECEIVE CONNECT RESPONSE ---
     let mut conn_resp_buf = [0u8; 16];
     socket
         .recv(&mut conn_resp_buf)
@@ -102,7 +98,6 @@ pub fn announce_udp(
         return Err(TrackerError::UdpTransactionIdMismatch);
     }
 
-    // --- 5. ANNOUNCE PHASE ---
     let peer_id = {
         let mut id = [0u8; 20];
         id[0..8].copy_from_slice(b"-RS0001-");
@@ -127,7 +122,6 @@ pub fn announce_udp(
     ann_req_buf.write_u16::<BigEndian>(6881)?; // port
     socket.send(&ann_req_buf)?;
 
-    // --- 6. RECEIVE ANNOUNCE RESPONSE ---
     let mut ann_resp_buf = vec![0u8; 8192]; // Use a large buffer
     let bytes_read = socket
         .recv(&mut ann_resp_buf)
@@ -191,7 +185,6 @@ fn parse_peers(bytes: &[u8]) -> Result<Vec<Peer>, TrackerError> {
 }
 
 pub fn announce(tracker_url: &str, info_hash: [u8; 20]) -> Result<TrackerResponse, TrackerError> {
-    // 1. Generate a Peer ID
     let peer_id = {
         let mut id = [0u8; 20];
         // <Client Abbreviation><Version>-<Randomness>
@@ -219,12 +212,10 @@ pub fn announce(tracker_url: &str, info_hash: [u8; 20]) -> Result<TrackerRespons
 
     let final_url = url_serializer.finish().to_string();
 
-    // 3. Make the GET request
     println!("Announcing to tracker: {}", final_url);
     let client = Client::new();
     let response_bytes = client.get(final_url).send()?.bytes()?;
 
-    // 4. Decode the Bencoded response
     let (bencode_response, _) =
         crate::bencode::decode(&response_bytes).map_err(|_| TrackerError::Bencode)?;
 
@@ -233,7 +224,6 @@ pub fn announce(tracker_url: &str, info_hash: [u8; 20]) -> Result<TrackerRespons
         _ => return Err(TrackerError::Bencode),
     };
 
-    // Check for a "failure reason" key
     if let Some(BencodeValue::Bytes(reason_bytes)) = response_dict.get(&b"failure reason"[..]) {
         let reason = String::from_utf8_lossy(reason_bytes).to_string();
         return Err(TrackerError::Failure(reason));
@@ -250,4 +240,30 @@ pub fn announce(tracker_url: &str, info_hash: [u8; 20]) -> Result<TrackerRespons
     };
 
     Ok(TrackerResponse { interval, peers })
+}
+
+pub async fn find_peers(magnet: &Magnet) -> Result<Vec<Peer>, Box<dyn std::error::Error>> {
+    for tracker_url in &magnet.trackers {
+        let response_result = if tracker_url.starts_with("http") {
+            // TODO: Replace with non-blocking
+            tokio::task::block_in_place(move || announce(tracker_url, magnet.info_hash))
+        } else if tracker_url.starts_with("udp") {
+            announce_udp(tracker_url, magnet.info_hash)
+        } else {
+            eprintln!("  > Skipping unsupported tracker protocol: {}", tracker_url);
+            continue;
+        };
+        
+        match response_result {
+            Ok(response) => {
+                 println!("  > Success! Got {} peers from tracker {}.", response.peers.len(), tracker_url);
+                 return Ok(response.peers);
+            }
+            Err(e) => {
+                eprintln!("    > Announce to {} failed: {}", tracker_url, e);
+            }
+        }
+    }
+
+    Err("Could not get a peer list from any tracker.".into())
 }
