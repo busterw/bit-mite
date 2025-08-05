@@ -244,7 +244,7 @@ impl PieceManager {
                 p.state != PieceState::Have
                     && peer_bitfield
                         .get(*i / 8)
-                        .map_or(false, |&byte| (byte >> (7 - (*i % 8))) & 1 != 0)
+                        .is_some_and(|&byte| (byte >> (7 - (*i % 8))) & 1 != 0)
             })
             .collect::<Vec<_>>();
         candidates.sort_by_key(|(i, _)| rarity.counts[*i]);

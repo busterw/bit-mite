@@ -192,7 +192,7 @@ pub async fn run_session(
                         }
                         let rarity = rarity_mutex.lock().await;
                         if let Some(block_req) =
-                            manager.get_block_to_request(&torrent, bitfield, &rarity)
+                            manager.get_block_to_request(torrent, bitfield, &rarity)
                         {
                             manager.add_pending_request(&block_req);
                             local_peer_state.pending_blocks.push(block_req);
@@ -437,32 +437,30 @@ impl PeerConnection {
                     let metadata_size =
                         dict.get(&b"metadata_size"[..]).and_then(|v| v.as_integer());
                     Message::Extended(ExtendedMessage::Handshake { m, metadata_size })
-                } else {
-                    if let Ok((b_part, rem_data)) = crate::bencode::decode(bencode_payload) {
-                        let dict = b_part.as_dict().ok_or(std::io::ErrorKind::InvalidData)?;
-                        let msg_type = dict
-                            .get(&b"msg_type"[..])
-                            .and_then(|v| v.as_integer())
-                            .ok_or(std::io::ErrorKind::InvalidData)?;
-                        let piece = dict
-                            .get(&b"piece"[..])
-                            .and_then(|v| v.as_integer())
-                            .ok_or(std::io::ErrorKind::InvalidData)?;
-                        match msg_type {
-                            1 => Message::Extended(ExtendedMessage::MetadataPiece {
-                                piece,
-                                total_size: dict
-                                    .get(&b"total_size"[..])
-                                    .and_then(|v| v.as_integer())
-                                    .unwrap_or(0),
-                                data: rem_data.to_vec(),
-                            }),
-                            2 => Message::Extended(ExtendedMessage::MetadataReject { piece }),
-                            _ => return Ok(None),
-                        }
-                    } else {
-                        return Ok(None);
+                } else if let Ok((b_part, rem_data)) = crate::bencode::decode(bencode_payload) {
+                    let dict = b_part.as_dict().ok_or(std::io::ErrorKind::InvalidData)?;
+                    let msg_type = dict
+                        .get(&b"msg_type"[..])
+                        .and_then(|v| v.as_integer())
+                        .ok_or(std::io::ErrorKind::InvalidData)?;
+                    let piece = dict
+                        .get(&b"piece"[..])
+                        .and_then(|v| v.as_integer())
+                        .ok_or(std::io::ErrorKind::InvalidData)?;
+                    match msg_type {
+                        1 => Message::Extended(ExtendedMessage::MetadataPiece {
+                            piece,
+                            total_size: dict
+                                .get(&b"total_size"[..])
+                                .and_then(|v| v.as_integer())
+                                .unwrap_or(0),
+                            data: rem_data.to_vec(),
+                        }),
+                        2 => Message::Extended(ExtendedMessage::MetadataReject { piece }),
+                        _ => return Ok(None),
                     }
+                } else {
+                    return Ok(None);
                 }
             }
             _ => return Ok(None),

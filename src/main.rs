@@ -9,12 +9,9 @@ pub mod tracker;
 
 use crate::magnet::Magnet;
 use crate::peer::GlobalState;
-use crate::torrent::{PieceManager, Torrent};
 use futures::future::join_all;
-use rand::{Rng, RngCore};
+use rand::RngCore;
 use std::collections::VecDeque;
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -108,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let manager = manager_mutex.lock().await;
         if manager.is_complete() {
             println!("\n✅ Download complete!");
-            manager.write_to_disk(&torrent)?;
+            manager.write_to_disk(torrent)?;
         } else {
             println!("\n❌ Download incomplete.");
         }
