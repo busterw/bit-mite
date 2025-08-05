@@ -1,5 +1,3 @@
-// src/bencode.rs
-
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

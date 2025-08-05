@@ -1,6 +1,5 @@
-// src/peer.rs
-
 use crate::bencode::BencodeValue;
+use crate::manager::ToManager;
 use crate::metadata::MetadataDownloader;
 use crate::torrent::{BLOCK_SIZE, BlockInfo, PieceManager, PieceRarity, Torrent};
 use crate::tracker;
@@ -12,7 +11,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 use tokio::time::Duration;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -136,6 +135,7 @@ pub async fn run_session(
         bitfield: None,
         pending_blocks: Vec::new(),
     };
+
     let mut am_metadata_downloader = false;
     {
         let mut state = shared_state.lock().await;
@@ -149,11 +149,10 @@ pub async fn run_session(
             }
         }
     }
+
     if am_metadata_downloader {
-        let (ut_id, meta_size) = (
-            peer_handshake_result.ut_metadata_id.unwrap(),
-            peer_handshake_result.metadata_size.unwrap(),
-        );
+        let ut_id = peer_handshake_result.ut_metadata_id.unwrap();
+        let meta_size = peer_handshake_result.metadata_size.unwrap();
         match connection
             .download_metadata_from_peer(info_hash, ut_id, meta_size)
             .await
@@ -174,7 +173,6 @@ pub async fn run_session(
 
     let session_timeout = Duration::from_secs(180);
     let start_time = std::time::Instant::now();
-
     while start_time.elapsed() < session_timeout {
         let global_state = shared_state.lock().await.clone();
         if let GlobalState::ContentDownload(torrent, manager_mutex, rarity_mutex) = &global_state {
@@ -192,7 +190,7 @@ pub async fn run_session(
                         }
                         let rarity = rarity_mutex.lock().await;
                         if let Some(block_req) =
-                            manager.get_block_to_request(torrent, bitfield, &rarity)
+                            manager.get_block_to_request(&torrent, bitfield, &rarity)
                         {
                             manager.add_pending_request(&block_req);
                             local_peer_state.pending_blocks.push(block_req);
@@ -269,6 +267,8 @@ pub async fn run_session(
                     block,
                 } => {
                     let block_index = (begin / BLOCK_SIZE) as usize;
+
+                    // Remove from local pending queue
                     let block_key = BlockInfo {
                         piece_index: index as usize,
                         block_index,
@@ -280,6 +280,7 @@ pub async fn run_session(
                     }) {
                         local_peer_state.pending_blocks.remove(pos);
                     }
+
                     if let GlobalState::ContentDownload(_, manager_mutex, _) =
                         &*shared_state.lock().await
                     {
@@ -289,7 +290,11 @@ pub async fn run_session(
                             block_index,
                             length: block.len() as u32,
                         };
+
+                        // Remove from global pending queue
                         manager.remove_pending_request(&block_info);
+
+                        // If this block completes the piece, verify it and update state.
                         if manager.add_block(&block_info, block) {
                             let piece_data = manager.pieces[index as usize].assemble();
                             if manager.pieces[index as usize].verify(&piece_data) {
@@ -301,7 +306,9 @@ pub async fn run_session(
                                     manager.count_have_pieces(),
                                     manager.pieces.len()
                                 );
+                                // THE LOGIC TO WRITE TO DISK IS NO LONGER HERE.
                             } else {
+                                println!("  > ❌ PIECE #{} IS INVALID. HASH MISMATCH.", index);
                                 manager.reset_piece(index as usize);
                             }
                         }
