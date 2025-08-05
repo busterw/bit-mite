@@ -7,12 +7,10 @@ pub mod torrent;
 pub mod tracker;
 
 use crate::magnet::Magnet;
-use crate::torrent::{PieceManager, PieceRarity, Torrent};
 use futures::future::join_all;
 use peer::GlobalState;
-use rand::{Rng, RngCore};
+use rand::RngCore;
 use std::collections::VecDeque;
-use std::fs::{self, File};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -119,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 "\n✅ Download complete! All {} pieces verified.",
                 manager.pieces.len()
             );
-            manager.write_to_disk(&torrent)?;
+            manager.write_to_disk(torrent)?;
             println!(
                 "   Files written successfully to './downloads/{}'",
                 torrent.name

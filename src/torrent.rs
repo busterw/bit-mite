@@ -1,6 +1,5 @@
 use crate::bencode::BencodeValue;
 use sha1::{Digest, Sha1};
-use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 pub const BLOCK_SIZE: u32 = 16384;
@@ -266,7 +265,7 @@ impl PieceManager {
                 p.state != PieceState::Have
                     && peer_bitfield
                         .get(*i / 8)
-                        .map_or(false, |&byte| (byte >> (7 - (*i % 8))) & 1 != 0)
+                        .is_some_and(|&byte| (byte >> (7 - (*i % 8))) & 1 != 0)
             })
             .collect::<Vec<_>>();
 
@@ -319,7 +318,7 @@ impl PieceManager {
     }
     pub fn write_to_disk(&self, torrent: &Torrent) -> std::io::Result<()> {
         use std::fs;
-        use std::io::{Seek, SeekFrom, Write};
+        use std::io::Write;
         use std::path::PathBuf;
 
         let download_dir = PathBuf::from("./downloads").join(&torrent.name);

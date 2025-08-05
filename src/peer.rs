@@ -1,5 +1,4 @@
 use crate::bencode::BencodeValue;
-use crate::manager::ToManager;
 use crate::metadata::MetadataDownloader;
 use crate::torrent::{BLOCK_SIZE, BlockInfo, PieceManager, PieceRarity, Torrent};
 use crate::tracker;
@@ -11,7 +10,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
 use tokio::time::Duration;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -190,7 +189,7 @@ pub async fn run_session(
                         }
                         let rarity = rarity_mutex.lock().await;
                         if let Some(block_req) =
-                            manager.get_block_to_request(&torrent, bitfield, &rarity)
+                            manager.get_block_to_request(torrent, bitfield, &rarity)
                         {
                             manager.add_pending_request(&block_req);
                             local_peer_state.pending_blocks.push(block_req);

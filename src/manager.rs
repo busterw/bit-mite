@@ -1,7 +1,6 @@
 // src/manager.rs
 
 use crate::torrent::BlockInfo;
-use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 /// A message sent FROM a peer session TO the central manager task.
