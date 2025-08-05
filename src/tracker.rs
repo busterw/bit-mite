@@ -242,7 +242,9 @@ pub fn announce(tracker_url: &str, info_hash: [u8; 20]) -> Result<TrackerRespons
     Ok(TrackerResponse { interval, peers })
 }
 
-pub async fn find_peers(magnet: &Magnet) -> Result<(Vec<Peer>, Duration), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn find_peers(
+    magnet: &Magnet,
+) -> Result<(Vec<Peer>, Duration), Box<dyn std::error::Error + Send + Sync>> {
     for tracker_url in &magnet.trackers {
         let response_result = if tracker_url.starts_with("http") {
             // TODO: Replace with non-blocking
